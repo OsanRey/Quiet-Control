@@ -10,6 +10,7 @@ Quiet Control — модификация Satelite. Исходный `LICENSE` Ap
 | Xray | 26.3.27 | MPL-2.0 |
 | Mihomo | 1.19.30 | GPLv3; точные условия в upstream LICENSE |
 | Wintun prebuilt | 0.14.1 | Отдельная лицензия готовых бинарных файлов |
+| Mihomo geodata snapshot | унаследованный ресурс Satelite | Отдельные данные MetaCubeX/meta-rules-dat; GPLv3 upstream и собственные условия исходных наборов, см. README/лицензию рядом с ресурсами |
 | Microsoft CRT/WebView2 | см. portable-inputs.lock.json | Microsoft terms; отдельная проверка распространения |
 
 Первичные источники: [sing-box](https://github.com/SagerNet/sing-box/blob/v1.13.18/LICENSE),

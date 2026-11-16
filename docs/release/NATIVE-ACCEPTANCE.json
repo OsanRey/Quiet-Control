@@ -1,0 +1,121 @@
+{
+  "stage": "post-cleanup GUI acceptance",
+  "run": "20261116-210923",
+  "qaVersion": "QC_CLEAN_V3",
+  "productCommit": "18c13cd93b72685e7ae710348169cb33658b80a9",
+  "sourceBaseline": "8b18a7b",
+  "passed": 15,
+  "errors": [],
+  "launcherExitCode": 0,
+  "checks": [
+    {
+      "name": "extracted_exe_hash_matches",
+      "passed": true
+    },
+    {
+      "name": "page_Настройки",
+      "passed": true
+    },
+    {
+      "name": "no_core_started",
+      "passed": true
+    },
+    {
+      "name": "local_node_saved",
+      "passed": true
+    },
+    {
+      "name": "selection_does_not_start_core",
+      "passed": true
+    },
+    {
+      "name": "dark_1200_fits",
+      "passed": true
+    },
+    {
+      "name": "dark_900_fits",
+      "passed": true
+    },
+    {
+      "name": "light_1200_fits",
+      "passed": true
+    },
+    {
+      "name": "light_900_fits",
+      "passed": true
+    },
+    {
+      "name": "normal_exit",
+      "passed": true
+    },
+    {
+      "name": "restart_preserves_local_favorite",
+      "passed": true
+    },
+    {
+      "name": "restart_does_not_start_core",
+      "passed": true
+    },
+    {
+      "name": "local_delete_works",
+      "passed": true
+    },
+    {
+      "name": "normal_exit",
+      "passed": true
+    },
+    {
+      "name": "network_unchanged",
+      "passed": true
+    }
+  ],
+  "priorRun": {
+    "id": "20261116-210300",
+    "passed": 9,
+    "failedScenario": "QA selector missed Settings outside main nav",
+    "primaryPagesOpened": 7,
+    "originalFailurePreservedPrivately": true
+  },
+  "screenshots": [
+    {
+      "file": "docs/screenshots/cleanup-nodes-dark-1200.png",
+      "width": 1200,
+      "height": 900,
+      "sha256": "f93589dcc501ef4d3f0a82a501d41a91ee265d6fb697bc4a48ad1e0a100bd8f5"
+    },
+    {
+      "file": "docs/screenshots/cleanup-nodes-dark-900.png",
+      "width": 900,
+      "height": 675,
+      "sha256": "d9469c4601a7d6fc9b2f6a2227bfb901ec4e2c2247f8ec1aaf4cd890f2c1b53e"
+    },
+    {
+      "file": "docs/screenshots/cleanup-home-dark.png",
+      "width": 900,
+      "height": 675,
+      "sha256": "b61c54c52736bf5c78ef0412d28754561f9869b66b78e90e1fe01c31f6073374"
+    },
+    {
+      "file": "docs/screenshots/cleanup-nodes-light-1200.png",
+      "width": 1200,
+      "height": 900,
+      "sha256": "06853145dd6f26f4f0974c320ed824b1c8cd0528d5d1d7b52616b6f30d8710a4"
+    },
+    {
+      "file": "docs/screenshots/cleanup-nodes-light-900.png",
+      "width": 900,
+      "height": 675,
+      "sha256": "c4bbeac8d02f9d90b720f032e22ce3f6e2241ac788fbb275ca7946ac091e898c"
+    },
+    {
+      "file": "docs/screenshots/cleanup-home-light.png",
+      "width": 900,
+      "height": 675,
+      "sha256": "8a66cabf097a914a6375b6de5435838c24f04aca61fd3c014a70991a3d885aeb"
+    }
+  ],
+  "rawReportSha256": "2a18c08e6414b4db4df93b1542576391a2e84bbff0db6b01f3d30df983c57697",
+  "networkMatrixRepeated": false,
+  "productionProfilesUsed": false,
+  "coreOrTunStarted": false
+}
