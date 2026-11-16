@@ -25,6 +25,7 @@ jobs:
       - run: pnpm build
       - run: node scripts/quiet-control/unified-nodes-test.mjs
       - run: node scripts/quiet-control/latency-display-test.mjs
+      - run: node scripts/quiet-control/cleanup/navigation-test.mjs
       - run: cargo check --locked --manifest-path src-tauri/Cargo.toml --lib
         env:
           CARGO_INCREMENTAL: '0'

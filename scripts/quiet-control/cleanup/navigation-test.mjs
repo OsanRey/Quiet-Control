@@ -1,0 +1,21 @@
+// Render the real Chrome component; no WebView, network, core or user store.
+import fs from 'node:fs';
+import vm from 'node:vm';
+import ts from 'typescript';
+import React from 'react';
+import * as jsx from 'react/jsx-runtime';
+import {renderToStaticMarkup} from 'react-dom/server';
+import assert from 'node:assert/strict';
+const labels={'qc.001':'Главная','qc.003':'Узлы','qc.124':'Маршруты','qc.125':'Статистика','qc.006':'Инструменты','qc.007':'Журнал','qc.008':'Настройки'};
+const code=ts.transpileModule(fs.readFileSync('src/quiet-control/v2/Interface.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText;
+const module={exports:{}};
+const mocks={react:React,'react/jsx-runtime':jsx,'../../i18n':{q:key=>labels[key]??key},'../Theme':{useQuietTheme:()=>({preference:'dark',setPreference:()=>{}})},'./Icon':{Icon:()=>React.createElement('svg')},'../primitives':{Dialog:()=>null},'../privacy':{redactSecrets:s=>s},'../data':{}};
+vm.runInNewContext(code,{module,exports:module.exports,require:name=>{if(name.endsWith('.css'))return {};if(name in mocks)return mocks[name];throw Error('Unexpected import '+name)},matchMedia:()=>({matches:true})});
+const html=renderToStaticMarkup(React.createElement(module.exports.Chrome,{data:{status:null},page:'home',navigate:()=>{},mainRef:{current:null}},React.createElement('p',null,'QA content')));
+const sidebar=html.match(/<aside\b[^>]*class="sidebar"[^>]*>([\s\S]*?)<\/aside>/)[1];
+const mainNav=sidebar.match(/<nav\b[^>]*>([\s\S]*?)<\/nav>/)[1];
+const buttons=markup=>[...markup.matchAll(/<button\b[^>]*aria-label="([^"]+)"[^>]*>/g)].map(m=>m[1]);
+assert.equal(buttons(mainNav).includes('Настройки'),false,'Original narrow selector must miss Settings');
+assert.deepEqual(buttons(sidebar),['Главная','Узлы','Маршруты','DNS','Статистика','Инструменты','Журнал','Настройки']);
+assert.equal((sidebar.match(/class="nav-link /g)||[]).length,8);
+console.log('Passed: real Chrome render exposes all eight sidebar links; Settings is outside nav-items.');

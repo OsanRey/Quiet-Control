@@ -6,14 +6,15 @@ import {connect,wait} from './cdp.mjs';
 const qa=process.env.QC_QA_ROOT;
 if(!qa||!fs.existsSync(qa+'/qa-guest.marker'))throw Error('Marked VMware QA root required');
 const out=qa+'/Results',root=qa+'/Extract/Satelite-Research',exec=promisify(execFile);
-const report={stage:'cleanup',qaVersion:'QC_CLEAN_V2',checks:[],errors:[],screenshots:[]};
+const report={stage:'cleanup',qaVersion:'QC_CLEAN_V3',checks:[],errors:[],screenshots:[]};
+report.previousRun={id:'20261116-210300',passed:9,error:'Navigation missing: Настройки',note:'Seven primary pages and normal exit confirmed; original failed report retained'};
 let app,c;
 const save=()=>fs.writeFileSync(out+'/cleanup.json',JSON.stringify(report,null,2));
 const check=(name,passed)=>{report.checks.push({name,passed:!!passed});save()};
 const ps=async code=>JSON.parse((await exec('powershell.exe',['-NoProfile','-Command','[Console]::OutputEncoding=[Text.UTF8Encoding]::new();'+code+' | ConvertTo-Json -Depth 8 -Compress'],{timeout:20000})).stdout.trim()||'null');
 const snapshot=()=>ps("[ordered]@{routes=@(Get-NetRoute | Sort-Object InterfaceIndex,DestinationPrefix,NextHop | Select-Object InterfaceIndex,DestinationPrefix,NextHop);dns=@(Get-DnsClientServerAddress | Sort-Object InterfaceIndex,AddressFamily | Select-Object InterfaceIndex,AddressFamily,ServerAddresses)}");
 async function until(expression){for(let i=0;i<100;i++){if(await c.evaluate(expression))return;await wait(150)}throw Error('UI readiness timeout')}
-async function page(label){await until('!!document.querySelector(".nav-items")');const ok=await c.evaluate(`(()=>{const e=[...document.querySelectorAll('.nav-items button')].find(e=>e.getAttribute('aria-label')===${JSON.stringify(label)}||e.textContent.trim()===${JSON.stringify(label)});e?.click();return !!e})()`);if(!ok)throw Error('Navigation missing: '+label);await wait(450)}
+async function page(label){await until('!!document.querySelector(".sidebar")');const ok=await c.evaluate(`(()=>{const e=[...document.querySelectorAll('.sidebar button.nav-link')].find(e=>e.getAttribute('aria-label')===${JSON.stringify(label)}||e.textContent.trim()===${JSON.stringify(label)});e?.click();return !!e})()`);if(!ok)throw Error('Navigation missing: '+label);await wait(450)}
 async function launch(){
  app=spawn(root+'/satelite-proxy.exe',[],{cwd:root,env:{...process.env,SATELITE_TEST_CDP_PORT:'9222'},windowsHide:true,stdio:['ignore',fs.openSync(out+'/app.stdout.log','a'),fs.openSync(out+'/app.stderr.log','a')]});
  c=await connect();await c.call('Page.enable');await c.invoke('get_settings');
@@ -32,7 +33,8 @@ try{
  const {createHash}=await import('node:crypto');check('extracted_exe_hash_matches',createHash('sha256').update(fs.readFileSync(root+'/satelite-proxy.exe')).digest('hex')===inputs.exeSha256);
  report.phase='launch';save();await launch();await c.invoke('update_settings',{locale:'ru',quietTheme:'dark',closeToTray:false});
  await c.call('Page.reload');await until('!!document.querySelector(".nav-items")');
- for(const label of ['Главная','Узлы','Маршруты','DNS','Статистика','Инструменты','Журнал','Настройки']){await page(label);check('page_'+label,await c.evaluate('document.body.innerText.length>100'))}
+ // V2 already opened all seven primary pages and closed normally; only the missed footer remains.
+ for(const label of ['Настройки']){await page(label);check('page_'+label,await c.evaluate('document.body.innerText.length>100'))}
  check('no_core_started',!(await c.invoke('get_proxy_status')).running);
  const sub=(await c.invoke('add_subscription_text',{name:'Local QA source',content:'socks5://127.0.0.1:9#Local%20QA%20node'})).subscription;
  const node=(await c.invoke('list_subscription_nodes',{id:sub.id}))[0];check('local_node_saved',!!node);

@@ -50,7 +50,7 @@ with path.open('rb') as disk:
     walk(descriptor[156:156+descriptor[156]])
     manifest = json.loads(read(*entries['qa-inputs.json']))
     verified=[]
-    if manifest['diskLabel']!='QC_CLEAN_V2':raise ValueError('Wrong QA label')
+    if manifest['diskLabel']!='QC_CLEAN_V3':raise ValueError('Wrong QA label')
     for item in manifest['files']:
         offset,left=entries[('payload/'+item['path']).casefold()];digest=hashlib.sha256()
         while left:
@@ -59,6 +59,6 @@ with path.open('rb') as disk:
         verified.append(item['path'])
     if hashlib.sha256(read(*entries['guest-run.ps1'])).hexdigest()!=manifest['launcherSha256']:raise ValueError('Launcher mismatch')
     if manifest['qaNodeSha256']!='247e9693d316da9857e44990e5e11709f596f18112251b8026ec6eed80bdf38a':raise ValueError('Unexpected Node pin')
-    if b'QC_CLEAN_V2' not in read(*entries['start-qa.cmd']):raise ValueError('Wrong launcher')
+    if b'QC_CLEAN_V3' not in read(*entries['start-qa.cmd']):raise ValueError('Wrong launcher')
     result={'diskLabel':manifest['diskLabel'],'productCommit':manifest['productCommit'],'allPayloadHashesVerified':True,'readOnlyNoMount':True,'files':verified}
     output.write_text(json.dumps(result,indent=2),encoding='utf-8');print(json.dumps(result,indent=2))
