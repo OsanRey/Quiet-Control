@@ -195,6 +195,11 @@ pub struct AppSettings {
     /// Last selected node id (ProxyNode.id)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_manual_node_id: Option<String>,
+    /// Cached choices/favorites no longer present in a successful subscription.
+    #[serde(default)]
+    pub retained_node_ids: std::collections::BTreeSet<String>,
     /// Secret written into last generated config (for future clash_api client)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clash_api_secret: Option<String>,
@@ -246,6 +251,8 @@ pub struct AppSettings {
     /// Global/Direct modes ignore this and force proxy/direct respectively.
     #[serde(default = "default_route_final")]
     pub route_final: String,
+    #[serde(default)]
+    pub selected_apps_only: bool,
 
     // —— Application preferences ——
     /// Close window → hide to tray (keep process + core). If false, quit app.
@@ -271,6 +278,9 @@ pub struct AppSettings {
     /// UI theme: `day` (light default) | `aerospace` (dark).
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Quiet Control preference, separate from the resolved upstream theme.
+    #[serde(default)]
+    pub quiet_theme: Option<String>,
     /// UI accent (brand/primary color) preset id, e.g. `green` | `blue` | ...
     #[serde(default = "default_accent")]
     pub accent: String,
@@ -439,7 +449,7 @@ fn default_glass_frost() -> bool {
 }
 
 fn default_locale() -> String {
-    "zh".into()
+    "ru".into()
 }
 
 fn default_theme() -> String {
@@ -464,13 +474,15 @@ fn default_hero_style() -> String {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            mixed_port: 2080,
+            mixed_port: 32080,
             allow_lan: false,
-            api_port: 19090,
+            api_port: 39090,
             extra_inbounds: Vec::new(),
             current_node_id: None,
+            last_manual_node_id: None,
+            retained_node_ids: Default::default(),
             clash_api_secret: None,
-            api_secret_enabled: false,
+            api_secret_enabled: true,
             probe_url: default_probe_url(),
             mix_mode: false,
             tun_enabled: false,
@@ -481,6 +493,7 @@ impl Default for AppSettings {
             bypass_lan: true,
             outbound_mode: OutboundMode::Rule,
             route_final: default_route_final(),
+            selected_apps_only: false,
             close_to_tray: true,
             launch_at_login: false,
             silent_start: false,
@@ -488,6 +501,7 @@ impl Default for AppSettings {
             close_connections_on_switch: false,
             locale: default_locale(),
             theme: default_theme(),
+            quiet_theme: None,
             accent: default_accent(),
             glow_color: default_glow_color(),
             hero_style: default_hero_style(),
@@ -632,12 +646,10 @@ mod tests {
     }
 
     #[test]
-    fn new_store_keeps_api_secret_disabled_by_default() {
-        // A clean/new AppSettings never had a secret, so the migration is a
-        // no-op: users who never turned this on don't get surprised by it.
+    fn new_store_requires_api_authentication_by_default() {
         let mut settings = AppSettings::default();
         settings.migrate_api_secret_enabled();
-        assert!(!settings.api_secret_enabled);
+        assert!(settings.api_secret_enabled);
     }
 
     #[test]
@@ -645,6 +657,7 @@ mod tests {
         // Pre-toggle stores always carried a secret unconditionally — treat
         // that as "was enabled" so upgrading doesn't drop anyone's auth.
         let mut settings = AppSettings {
+            api_secret_enabled: false,
             clash_api_secret: Some("abc123".into()),
             ..AppSettings::default()
         };
@@ -655,6 +668,7 @@ mod tests {
     #[test]
     fn store_with_an_empty_secret_field_stays_disabled() {
         let mut settings = AppSettings {
+            api_secret_enabled: false,
             clash_api_secret: Some("   ".into()),
             ..AppSettings::default()
         };
@@ -712,5 +726,18 @@ mod tests {
         let back: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.extra_inbounds, settings.extra_inbounds);
         assert!(json.contains("\"allow_lan\":true"));
+    }
+
+    #[test]
+    fn quiet_theme_legacy_store_and_roundtrip() {
+        let legacy = r#"{"mixed_port":2080,"api_port":19090}"#;
+        let mut settings: AppSettings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(settings.quiet_theme, None);
+        for preference in ["dark", "light", "system"] {
+            settings.quiet_theme = Some(preference.into());
+            let saved = serde_json::to_string(&settings).unwrap();
+            let loaded: AppSettings = serde_json::from_str(&saved).unwrap();
+            assert_eq!(loaded.quiet_theme.as_deref(), Some(preference));
+        }
     }
 }

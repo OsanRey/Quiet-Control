@@ -40,6 +40,7 @@ fn apply_selected_node(
     node_id: String,
     manual: bool,
 ) -> bool {
+    if manual {settings.last_manual_node_id=Some(node_id.clone());}
     let was_kernel = settings.auto_select.is_kernel();
     settings.current_node_id = Some(node_id);
     if manual {
@@ -75,6 +76,298 @@ mod kernel_selection_poll_tests {
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::sync::Arc;
+
+    #[test]
+    fn unified_prepare_preserves_running_core_mode_and_enabled_sources() {
+        let (state,dir)=profile_pick_fixture();
+        state.with_store_mut(|s|{s.settings.current_node_id=Some("a".into());s.settings.last_manual_node_id=Some("a".into());s.settings.auto_select=crate::domain::AutoSelectMode::Kernel;Ok(())}).unwrap();
+        {let mut runtime=state.lock_runtime();runtime.core.force_state_for_tests(CoreState::Running);runtime.actual_node_id=Some("a".into());}
+        let before=state.with_store(|s|Ok(s.clone())).unwrap();
+        let selected=state.prepare_node_selection("b").unwrap();
+        assert_eq!(selected.last_manual_node_id.as_deref(),Some("b"));assert_eq!(selected.current_node_id.as_deref(),Some("a"));
+        assert_eq!(selected.auto_select,crate::domain::AutoSelectMode::Kernel);
+        assert_eq!(state.lock_runtime().actual_node_id.as_deref(),Some("a"));assert!(state.is_core_running());
+        let after=state.with_store(|s|Ok(s.clone())).unwrap();
+        assert_eq!(before.subscriptions.iter().map(|s|s.enabled).collect::<Vec<_>>(),after.subscriptions.iter().map(|s|s.enabled).collect::<Vec<_>>());
+        assert_eq!(serde_json::to_value(&before.rule_sets).unwrap(),serde_json::to_value(&after.rule_sets).unwrap());
+        drop(state);assert!(dir.starts_with(std::env::temp_dir()));let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unified_staged_choice_survives_reload_without_enabling_source() {
+        let (state, dir) = profile_pick_fixture();
+        let before = state.with_store(|s| Ok(s.clone())).unwrap();
+        state.prepare_node_selection("b").unwrap();
+        for id in ["missing"] {
+            assert!(state.prepare_node_selection(id).is_err());
+        }
+        drop(state);
+        let state = AppState::load(dir.clone(), None).unwrap();
+        state.with_store(|s| {
+            assert_eq!(s.settings.last_manual_node_id.as_deref(), Some("b"));
+            assert_eq!(s.settings.current_node_id, before.settings.current_node_id);
+            assert_eq!(s.subscriptions.iter().map(|s| s.enabled).collect::<Vec<_>>(), before.subscriptions.iter().map(|s| s.enabled).collect::<Vec<_>>());
+            assert_eq!(s.nodes.len(), before.nodes.len());
+            Ok(())
+        }).unwrap();
+        assert!(!state.is_core_running());
+        drop(state);
+        assert!(dir.starts_with(std::env::temp_dir()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unified_delete_active_is_refused_without_mutation() {
+        let (state,dir)=profile_pick_fixture();state.lock_runtime().core.force_state_for_tests(CoreState::Running);
+        let before=state.with_store(|s|Ok(serde_json::to_value(s).unwrap())).unwrap();
+        assert!(state.remove_subscription_safely("a").unwrap_err().to_string().contains("sources.stop_before_delete"));
+        assert_eq!(before,state.with_store(|s|Ok(serde_json::to_value(s).unwrap())).unwrap());assert!(state.is_core_running());
+        drop(state);assert!(dir.starts_with(std::env::temp_dir()));let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unified_delete_inactive_preserves_other_and_local_nodes() {
+        let (state,dir)=profile_pick_fixture();
+        let local=crate::services::import::import_from_text(Some("Local fixture".into()),"trojan://fixture@local.example:443#Local".into(),Some("local-fixture".into())).unwrap();
+        state.with_store_mut(|s|{s.upsert_subscription(local.subscription,local.nodes)?;s.subscriptions.iter_mut().for_each(|p|p.enabled=p.id=="a");s.settings.current_node_id=Some("a".into());s.settings.last_manual_node_id=Some("b".into());s.favorite_nodes.insert("a".into());Ok(())}).unwrap();
+        state.lock_runtime().core.force_state_for_tests(CoreState::Running);
+        state.remove_subscription_safely("b").unwrap();
+        state.with_store(|s|{assert!(s.get_subscription("b").is_none());assert!(s.find_node("a").is_some());assert!(s.nodes.iter().any(|n|n.subscription_id=="local-fixture"));assert!(s.favorite_nodes.contains("a"));assert_eq!(s.settings.current_node_id.as_deref(),Some("a"));assert!(s.settings.last_manual_node_id.is_none());Ok(())}).unwrap();
+        assert!(state.is_core_running());drop(state);assert!(dir.starts_with(std::env::temp_dir()));let _=std::fs::remove_dir_all(dir);
+    }
+
+    fn profile_pick_fixture() -> (AppState, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "satelite-profile-pick-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let state = AppState::load(dir.clone(), None).unwrap();
+        state
+            .with_store_mut(|store| {
+                for id in ["a", "b"] {
+                    store.upsert_subscription(
+                        crate::domain::Subscription {
+                            id: id.into(),
+                            name: id.into(),
+                            source: crate::domain::SubscriptionSource::Url {
+                                url: "https://example.com/test".into(),
+                            },
+                            last_update: 1,
+                            node_count: 0,
+                            enabled: id == "a",
+                            format: None,
+                            skipped_count: 0,
+                            via_proxy: false,
+                            auto_update: false,
+                            auto_update_interval_min: 1440,
+                            traffic: None,
+                            user_agent: None,
+                            http: Default::default(),
+                        },
+                        vec![crate::domain::ProxyNode {
+                            id: id.into(),
+                            name: id.into(),
+                            protocol: crate::domain::Protocol::Trojan,
+                            server: "example.com".into(),
+                            port: 443,
+                            tls: None,
+                            transport: None,
+                            udp: None,
+                            config: crate::domain::ProtocolConfig::Trojan {
+                                password: "fixture".into(),
+                            },
+                            source: None,
+                            raw: None,
+                            latency_ms: Some(42),
+                            latency_at: Some(1),
+                        }],
+                    )?;
+                }
+                store.settings.current_node_id = Some("a".into());
+                Ok(())
+            })
+            .unwrap();
+        (state, dir)
+    }
+
+    #[test]
+    fn manual_profile_node_pick_keeps_caches_and_rebuilds_only_after_choice() {
+        for mix in [false, true] {
+            for running in [false, true] {
+                let (state, dir) = profile_pick_fixture();
+                state
+                    .with_store_mut(|store| {
+                        store.settings.mix_mode = mix;
+                        Ok(())
+                    })
+                    .unwrap();
+                if running {
+                    state
+                        .lock_runtime()
+                        .core
+                        .force_state_for_tests(CoreState::Running);
+                }
+                // Any live selector PUT would fail: inactive profile B is not
+                // in the existing core config and must take the rebuild path.
+                state.lock_runtime().api = Some(crate::api::ClashApi::new("127.0.0.1", 1, "test"));
+                let (settings, restart, live) = state
+                    .select_current_node_serialized("b", true, true)
+                    .unwrap();
+                assert_eq!(settings.current_node_id.as_deref(), Some("b"));
+                assert_eq!(restart, running);
+                assert!(!live);
+                state
+                    .with_store(|store| {
+                        assert_eq!(store.nodes.len(), 2);
+                        assert_eq!(store.find_node("a").unwrap().latency_ms, Some(42));
+                        assert!(
+                            store
+                                .subscriptions
+                                .iter()
+                                .find(|s| s.id == "b")
+                                .unwrap()
+                                .enabled
+                        );
+                        assert_eq!(
+                            store
+                                .subscriptions
+                                .iter()
+                                .find(|s| s.id == "a")
+                                .unwrap()
+                                .enabled,
+                            mix
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+                let reloaded = AppState::load(dir.clone(), None).unwrap();
+                reloaded
+                    .with_store(|store| {
+                        assert_eq!(store.nodes.len(), 2);
+                        assert_eq!(store.settings.current_node_id.as_deref(), Some("b"));
+                        Ok(())
+                    })
+                    .unwrap();
+                drop(reloaded);
+                drop(state);
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_profile_node_pick_keeps_active_profile_and_current_node() {
+        let (state, dir) = profile_pick_fixture();
+        state
+            .with_store_mut(|store| {
+                store
+                    .nodes
+                    .iter_mut()
+                    .find(|n| n.node.id == "b")
+                    .unwrap()
+                    .node
+                    .protocol = crate::domain::Protocol::Unknown;
+                Ok(())
+            })
+            .unwrap();
+        for id in ["missing", "b"] {
+            assert!(state
+                .select_current_node_serialized(id, true, true)
+                .is_err());
+            state
+                .with_store(|store| {
+                    assert_eq!(store.settings.current_node_id.as_deref(), Some("a"));
+                    assert!(
+                        store
+                            .subscriptions
+                            .iter()
+                            .find(|s| s.id == "a")
+                            .unwrap()
+                            .enabled
+                    );
+                    assert!(
+                        !store
+                            .subscriptions
+                            .iter()
+                            .find(|s| s.id == "b")
+                            .unwrap()
+                            .enabled
+                    );
+                    assert_eq!(store.nodes.len(), 2);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage43_manual_pick_while_stopped_commits_profile_and_choice_without_starting() {
+        let (state,dir)=profile_pick_fixture();
+        let settings=state.select_node_and_apply("b",None).unwrap();
+        assert_eq!(settings.current_node_id.as_deref(),Some("b"));
+        assert_eq!(settings.last_manual_node_id.as_deref(),Some("b"));assert!(!state.is_core_running());
+        state.with_store(|s|{assert_eq!(s.nodes.len(),2);assert!(s.subscriptions.iter().find(|s|s.id=="b").unwrap().enabled);Ok(())}).unwrap();
+        assert!(state.select_node_and_apply("missing",None).is_err());
+        assert_eq!(state.with_store(|s|Ok(s.settings.current_node_id.clone())).unwrap().as_deref(),Some("b"));
+        drop(state);let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage43_late_kernel_poll_cannot_overwrite_a_manual_choice() {
+        let (state,dir)=profile_pick_fixture();let state=Arc::new(state);
+        state.with_store_mut(|s|{s.settings.mix_mode=true;s.subscriptions.iter_mut().for_each(|s|s.enabled=true);s.settings.auto_select=crate::domain::AutoSelectMode::Kernel;Ok(())}).unwrap();
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();let port=listener.local_addr().unwrap().port();
+        let (seen_tx,seen_rx)=mpsc::channel();let (release_tx,release_rx)=mpsc::channel();
+        let server=std::thread::spawn(move||{
+            let (mut stream,_)=listener.accept().unwrap();stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();let mut buf=[0u8;2048];let _=stream.read(&mut buf).unwrap();
+            seen_tx.send(()).unwrap();release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let body=r#"{"now":"node-a"}"#;write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        });
+        {let mut r=state.lock_runtime();r.core.force_state_for_tests(CoreState::Running);r.api=Some(crate::api::ClashApi::new("127.0.0.1",port,"fixture"));}
+        let worker={let state=Arc::clone(&state);std::thread::spawn(move||state.sync_kernel_selection_outside_runtime_lock())};
+        seen_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        state.with_store_mut(|s|{apply_selected_node(&mut s.settings,"b".into(),true);Ok(())}).unwrap();
+        state.lock_runtime().actual_node_id=Some("b".into());release_tx.send(()).unwrap();worker.join().unwrap();server.join().unwrap();
+        state.with_store(|s|{assert_eq!(s.settings.auto_select,crate::domain::AutoSelectMode::Off);assert_eq!(s.settings.current_node_id.as_deref(),Some("b"));Ok(())}).unwrap();
+        assert_eq!(state.lock_runtime().actual_node_id.as_deref(),Some("b"));
+        drop(state);let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage43_rejected_live_selector_restores_previous_choice_without_core_restart() {
+        let (state,dir)=profile_pick_fixture();
+        state.with_store_mut(|s|{s.settings.mix_mode=true;s.subscriptions.iter_mut().for_each(|s|s.enabled=true);Ok(())}).unwrap();
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();let port=listener.local_addr().unwrap().port();
+        let server=std::thread::spawn(move||{
+            let mut bodies=Vec::new();
+            for code in [500,204] {
+                let (mut stream,_)=listener.accept().unwrap();stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request=Vec::new();let mut buf=[0u8;4096];
+                loop {
+                    let n=stream.read(&mut buf).unwrap();if n==0{break;}request.extend_from_slice(&buf[..n]);
+                    if let Some(end)=request.windows(4).position(|s|s==b"\r\n\r\n") {
+                        let header=String::from_utf8_lossy(&request[..end]);
+                        let len=header.lines().find_map(|l|l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v|v.trim().parse::<usize>().ok())).unwrap_or(0);
+                        if request.len()>=end+4+len {break;}
+                    }
+                }
+                bodies.push(String::from_utf8_lossy(&request).into_owned());
+                write!(stream,"HTTP/1.1 {code} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }bodies
+        });
+        {let mut r=state.lock_runtime();r.core.force_state_for_tests(CoreState::Running);r.actual_node_id=Some("a".into());r.api=Some(crate::api::ClashApi::new("127.0.0.1",port,"fixture"));}
+        assert!(state.select_node_and_apply("b",None).is_err());
+        assert_eq!(state.with_store(|s|Ok(s.settings.current_node_id.clone())).unwrap().as_deref(),Some("a"));
+        assert_eq!(state.lock_runtime().actual_node_id.as_deref(),Some("a"));assert!(state.is_core_running());
+        let requests=server.join().unwrap();assert_eq!(requests.len(),2);assert!(requests[0].contains("node-b"));assert!(requests[1].contains("node-a"));
+        drop(state);let _=std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn suppresses_concurrent_and_recent_status_polls() {
@@ -137,6 +430,7 @@ mod kernel_selection_poll_tests {
                         auto_update_interval_min: 1440,
                         traffic: None,
                         user_agent: None,
+                        http: Default::default(),
                     },
                     vec![crate::domain::ProxyNode {
                         id: "node-a".into(),
@@ -205,6 +499,7 @@ mod kernel_selection_poll_tests {
                         auto_update_interval_min: 1440,
                         traffic: None,
                         user_agent: None,
+                        http: Default::default(),
                     },
                     vec![crate::domain::ProxyNode {
                         id: "node-a".into(),
@@ -724,6 +1019,7 @@ impl AppState {
         &self,
         metrics: &crate::api::XrayMetrics,
         totals: crate::api::TrafficTotals,
+        counters: &std::collections::HashMap<String,(u64,u64)>,
     ) -> bool {
         if self.is_core_transitioning() || !metrics.is_active() {
             return false;
@@ -744,6 +1040,7 @@ impl AppState {
         {
             return false;
         }
+        runtime.apply_outbound_traffic(counters);
         runtime.apply_snapshot(crate::api::ConnectionsSnapshot {
             upload_total: totals.upload_total,
             download_total: totals.download_total,
@@ -1024,6 +1321,45 @@ impl AppState {
         }
         self.cache_status(&status);
         Ok(status)
+    }
+
+    pub fn apply_routing_document(&self, draft: crate::routing::Draft, resource_dir: Option<&Path>) -> AppResult<serde_json::Value> {
+        let _transition = self.begin_core_transition()?;
+        let mut runtime = self.lock_runtime();
+        let _persistence = self.lock_store_persistence();
+        let mut store = self.lock_store();
+        if store.settings.runtime_source().is_custom() { return Err(crate::error::AppError::Config("routing.custom.read_only".into())); }
+        if crate::routing::Document::from_store(&store).revision() != draft.base_revision { return Err(crate::error::AppError::Config("routing.revision.conflict".into())); }
+        crate::routing::ensure(&draft.document, &store)?;
+        let mut candidate = store.clone();
+        draft.document.put(&mut candidate);
+        crate::routing::validate_sources(&draft.document, &store, &self.app_data_dir)?;
+        crate::routing::preflight(&candidate, &self.app_data_dir, resource_dir)?;
+        crate::storage::replace_file(&self.app_data_dir.join("data/routing-last-good.json"), &serde_json::to_vec_pretty(&crate::routing::Document::from_store(&store)).map_err(|e|crate::error::AppError::Config(e.to_string()))?)?;
+        let was_running = runtime.status(&store).running;
+        let desired_system = store.settings.capture_mode == crate::domain::CaptureMode::System;
+        let applied = (|| -> AppResult<ProxyStatus> {
+            let status = if was_running { runtime.restart_core(&self.app_data_dir, resource_dir, &mut candidate)? } else { runtime.status(&candidate) };
+            if was_running && !status.running { return Err(crate::error::AppError::Core("routing.not_ready".into())); }
+            candidate.save(&self.store_path)?;
+            Ok(status)
+        })();
+        match applied {
+            Ok(status) => {
+                *store = candidate;
+                if status.system_proxy { self.record_proxy_ownership(store.settings.mixed_port); }
+                self.cache_status(&status);
+                let _ = std::fs::remove_file(self.app_data_dir.join("data/routing-draft.json"));
+                Ok(serde_json::json!({"applied":true,"running":status.running,"internet_verified":false,"revision":crate::routing::Document::from_store(&store).revision()}))
+            },
+            Err(error) => {
+                let restored = if was_running { runtime.restart_core(&self.app_data_dir, resource_dir, &mut store).and_then(|_|runtime.set_system_proxy(&store, desired_system)) } else { Ok(runtime.status(&store)) };
+                match restored {
+                    Ok(status) => { if status.system_proxy { self.record_proxy_ownership(store.settings.mixed_port); } self.cache_status(&status); Err(crate::error::AppError::Config(format!("routing.apply.rolled_back: {error}"))) },
+                    Err(recovery) => { let _=runtime.stop_proxy(&store); let _=crate::proxy::cleanup_stale_owned_proxy(&self.app_data_dir, store.settings.mixed_port); Err(crate::error::AppError::Core(format!("routing.apply.recovery_failed: {error}; {recovery}"))) }
+                }
+            }
+        }
     }
 
     pub fn restart_proxy(&self, resource_dir: Option<&Path>) -> AppResult<ProxyStatus> {
@@ -1427,6 +1763,33 @@ impl AppState {
                 manual && store.settings.auto_select.is_kernel(),
             ))
         })?;
+        // Browsing subscriptions is read-only. Only an explicit manual NODE
+        // choice enables its inactive owner; that node is absent from the live
+        // config, so select it and its profile atomically, then rebuild once.
+        let inactive_owner = if manual {
+            self.with_store(|store| {
+                Ok(store
+                    .nodes
+                    .iter()
+                    .find(|n| n.node.id == node_id)
+                    .and_then(|n| {
+                        store.subscriptions.iter().find(|s| {
+                            s.id == n.subscription_id && !s.enabled && s.source.contributes_nodes()
+                        })
+                    })
+                    .map(|s| s.id.clone()))
+            })?
+        } else {
+            None
+        };
+        if let Some(owner) = inactive_owner {
+            let settings = self.with_store_mut(|store| {
+                store.activate_subscription(&owner)?;
+                apply_selected_node(&mut store.settings, node_id.to_string(), true);
+                Ok(store.settings.clone())
+            })?;
+            return Ok((settings, core_running, false));
+        }
         let api = {
             let runtime = self.lock_runtime();
             runtime.clash_api_clone()
@@ -1454,7 +1817,119 @@ impl AppState {
         })?;
         let restart_needed =
             was_kernel || (core_kind == crate::core::CoreKind::Xray && core_running);
+        if selected_live {self.lock_runtime().actual_node_id=settings.current_node_id.clone();}
         Ok((settings, restart_needed, selected_live))
+    }
+
+    /// Stage the manual target without enabling its source or touching the core.
+    /// The existing apply transaction is used only by an explicit Connect action.
+    pub fn prepare_node_selection(&self,node_id:&str)->AppResult<crate::domain::AppSettings> {
+        let _operation=self.begin_core_transition()?;
+        self.with_store_mut(|store|{
+            if store.settings.runtime_source().is_custom(){return Err(crate::error::AppError::Config("selection.custom_read_only".into()));}
+            let node=store.find_node(node_id).ok_or_else(||crate::error::AppError::NotFound(node_id.into()))?;
+            let core=CoreKind::parse(&store.settings.core_type);
+            if !core.supports_node(node)&&!crate::runtime::node_delegatable(&store.settings,node){return Err(crate::error::AppError::Config("selection.unsupported_node".into()));}
+            store.settings.last_manual_node_id=Some(node_id.into());
+            Ok(store.settings.clone())
+        })
+    }
+
+    pub fn remove_subscription_safely(&self,id:&str)->AppResult<()> {
+        let _operation=self.begin_core_transition()?;
+        // is_core_running intentionally reports false during transitions to
+        // background schedulers. This operation owns the guard: read the core.
+        let (running,actual)={let runtime=self.lock_runtime();(runtime.core.is_running(),runtime.actual_node_id.clone())};
+        self.with_store_mut(|store|{
+            let sub=store.get_subscription(id).ok_or_else(||crate::error::AppError::NotFound(id.into()))?;
+            let active_custom=store.settings.runtime_source().singbox_id()==Some(id);
+            let owns_running_node=store.nodes.iter().any(|n|n.subscription_id==id&&(actual.as_deref()==Some(&n.node.id)||store.settings.current_node_id.as_deref()==Some(&n.node.id)));
+            if running&&(sub.enabled||active_custom||owns_running_node){return Err(crate::error::AppError::Config("sources.stop_before_delete".into()));}
+            let pending_removed=store.settings.last_manual_node_id.as_deref().is_some_and(|pending|store.nodes.iter().any(|n|n.subscription_id==id&&n.node.id==pending));
+            store.remove_subscription(id)?;
+            if pending_removed {store.settings.last_manual_node_id=None;}
+            Ok(())
+        })
+    }
+
+    pub fn select_node_and_apply(&self, node_id:&str, resource_dir:Option<&Path>) -> AppResult<crate::domain::AppSettings> {
+        let running=self.is_core_running();
+        let _operation=self.begin_core_transition()?;
+        let before=self.with_store(|store|Ok(store.clone()))?;
+        if before.settings.runtime_source().is_custom() {return Err(crate::error::AppError::Config("selection.custom_read_only".into()));}
+        let node=before.find_node(node_id).ok_or_else(||crate::error::AppError::NotFound(node_id.into()))?;
+        let kind=CoreKind::parse(&before.settings.core_type);
+        if !kind.supports_node(node) && !crate::runtime::node_delegatable(&before.settings,node) {
+            return Err(crate::error::AppError::Config("selection.unsupported_node".into()));
+        }
+        let owner=before.nodes.iter().find(|n|n.node.id==node_id).map(|n|n.subscription_id.clone())
+            .ok_or_else(||crate::error::AppError::NotFound(node_id.into()))?;
+        let enabled=before.subscriptions.iter().any(|s|s.id==owner&&s.enabled);
+        let mut candidate=before.clone();
+        if !enabled {candidate.activate_subscription(&owner)?;}
+        apply_selected_node(&mut candidate.settings,node_id.into(),true);
+        let (api,system,actual)={let runtime=self.lock_runtime();(runtime.clash_api_clone(),runtime.system_proxy_on,runtime.actual_node_id.clone())};
+        let restart=running && (!enabled || kind==CoreKind::Xray || before.settings.auto_select.is_kernel());
+        let mut applied=false;
+        let attempt=(|| -> AppResult<crate::domain::AppSettings> {
+            if restart {
+                self.pre_authorize_setuid_if_needed(resource_dir)?;
+                applied=true;
+                let mut runtime=self.lock_runtime();
+                let status=runtime.restart_core(&self.app_data_dir,resource_dir,&mut candidate)?;
+                if !status.running {return Err(crate::error::AppError::Core("selection.not_ready".into()));}
+                if runtime.system_proxy_on!=system {runtime.set_system_proxy(&candidate,system)?;}
+            } else if running {
+                let api=api.as_ref().ok_or_else(||crate::error::AppError::Core("selection.api_unavailable".into()))?;
+                applied=true;
+                api.select_proxy("proxy",&crate::config::outbound_tag(node))?;
+            }
+            let settings=self.with_store_mut(|store| {
+                // A refresh may have completed while the API was answering.
+                let current=store.find_node(node_id).ok_or_else(||crate::error::AppError::Config("selection.profile_changed".into()))?;
+                if crate::storage::profile_cache::connection_shape(current)!=crate::storage::profile_cache::connection_shape(node) {
+                    return Err(crate::error::AppError::Config("selection.profile_changed".into()));
+                }
+                for sub in &mut store.subscriptions {
+                    if let Some(s)=candidate.subscriptions.iter().find(|s|s.id==sub.id) {sub.enabled=s.enabled;}
+                }
+                apply_selected_node(&mut store.settings,node_id.into(),true);
+                store.settings.clash_api_secret=candidate.settings.clash_api_secret.clone();
+                Ok(store.settings.clone())
+            })?;
+            if running {
+                if !restart && before.settings.close_connections_on_switch {if let Some(api)=&api {let _=api.close_all_connections();}}
+                let mut runtime=self.lock_runtime();runtime.actual_node_id=Some(node_id.into());
+                let current=self.lock_store();self.cache_status(&runtime.status(&current));
+            }
+            Ok(settings)
+        })();
+        if let Err(error)=attempt {
+            // Keep refreshed caches, favorites and unrelated user edits.
+            let _=self.with_store_mut(|store| {
+                for sub in &mut store.subscriptions {if let Some(old)=before.subscriptions.iter().find(|s|s.id==sub.id){sub.enabled=old.enabled;}}
+                store.settings.current_node_id=before.settings.current_node_id.clone();
+                store.settings.last_manual_node_id=before.settings.last_manual_node_id.clone();
+                store.settings.auto_select=before.settings.auto_select;store.settings.smart_switch=before.settings.smart_switch;
+                store.settings.clash_api_secret=before.settings.clash_api_secret.clone();Ok(())
+            });
+            if running && applied {
+                let mut previous=before.clone();
+                if actual.is_some(){previous.settings.current_node_id=actual;}
+                let restored=if !restart {api.as_ref().and_then(|api|previous.settings.current_node_id.as_deref()
+                    .and_then(|id|previous.find_node(id)).map(|node|api.select_proxy("proxy",&crate::config::outbound_tag(node))))}
+                    else {None};
+                let mut runtime=self.lock_runtime();
+                let result=if matches!(restored,Some(Ok(()))){Ok(runtime.status(&previous))}
+                    else {runtime.restart_core(&self.app_data_dir,resource_dir,&mut previous)};
+                match result.and_then(|status|if runtime.system_proxy_on!=system {runtime.set_system_proxy(&previous,system)}else{Ok(status)}) {
+                    Ok(status)=>self.cache_status(&status),
+                    Err(recovery)=>{let _=runtime.stop_proxy(&previous);return Err(crate::error::AppError::Core(format!("selection.restore_failed: {error}; {recovery}")));}
+                }
+            }
+            return Err(error);
+        }
+        attempt
     }
 
     /// When auto_select=kernel, read Clash API group `now` and persist as current_node_id.
@@ -1511,12 +1986,12 @@ impl AppState {
         // the per-outbound stats counters (the picked outbound is the one
         // whose counters grow between polls; idle polls keep the last pick).
         // XrayMetrics only exists in Xray mode, so its presence is the check.
-        let now_tag = if let Some(api) = api {
+        let now_tag = if let Some(api) = &api {
             match api.proxy_group_now_with_timeout("proxy", KERNEL_SELECTION_HTTP_TIMEOUT) {
                 Ok(tag) => tag,
                 Err(_) => return,
             }
-        } else if let Some(metrics) = metrics {
+        } else if let Some(metrics) = &metrics {
             metrics.dominant_outbound_tag()
         } else {
             return;
@@ -1542,24 +2017,25 @@ impl AppState {
         let changed = self
             .with_store(|s| Ok(s.settings.current_node_id.as_deref() != Some(node_id.as_str())))
             .unwrap_or(false);
-        if !changed {
-            return;
-        }
-
-        if let Err(e) = self.with_store_mut(|store| {
-            store.settings.current_node_id = Some(node_id.clone());
-            Ok(())
-        }) {
-            app_log::warn(
-                "auto_select",
-                format!("persist kernel selection failed: {e}"),
-            );
-            return;
-        }
+        let needs_actual=api.is_some() && self.cached_status().actual_node_id.as_deref()!=Some(node_id.as_str());
+        if !changed && !needs_actual {return;}
+        // The HTTP response may arrive after a manual selection or core restart.
+        // Serialize only the commit and recheck both the mode and API session.
+        let Ok(_operation)=self.begin_core_transition() else {return;};
+        let session_valid={let runtime=self.lock_runtime();runtime.core.is_running() &&
+            if let Some(api)=&api {api.is_active()&&runtime.clash_api_clone().is_some_and(|current|current.same_session(api))}
+            else if let Some(metrics)=&metrics {runtime.xray_metrics_clone().is_some_and(|current|current.same_session(metrics))}else{false}};
+        if !session_valid{return;}
+        let applied=self.with_store_mut(|store| {
+            if store.settings.auto_select!=AutoSelectMode::Kernel{return Ok(false);}
+            store.settings.current_node_id=Some(node_id.clone());Ok(true)
+        });
+        if !matches!(applied,Ok(true)){return;}
         app_log::info(
             "auto_select",
             format!("kernel urltest now → node {node_id} ({tag})"),
         );
+        if api.is_some(){self.lock_runtime().actual_node_id=Some(node_id);}
     }
 
     pub fn shutdown_runtime(&self) {
@@ -1726,6 +2202,9 @@ impl AppState {
         let _persistence = self.lock_store_persistence();
         let mut store = self.lock_store();
 
+        if store.settings.selected_apps_only && mode != crate::domain::OutboundMode::Rule {
+            return Err(crate::error::AppError::Config("routing.apps.requires_rule_mode".into()));
+        }
         if store.settings.runtime_source().is_custom() {
             return Err(crate::error::AppError::Core(
                 "自写配置模式下无法切换规则 / 全局 / 直连".into(),

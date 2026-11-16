@@ -1,7 +1,25 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Quiet Control is a GUI application, including portable research/debug builds.
+// Diagnostics remain available in the application's file logs.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 fn main() {
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("--proxy-recovery-watchdog") {
+            let code = args.get(2).and_then(|s| s.parse::<u32>().ok())
+                .map(satelite_proxy_lib::run_proxy_recovery_watchdog).unwrap_or(2);
+            std::process::exit(code);
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let runtime = dir.join("webview-runtime");
+                if runtime.join("msedgewebview2.exe").is_file() {
+                    std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", runtime);
+                }
+            }
+        }
+    }
     #[cfg(target_os = "linux")]
     apply_webkitgtk_workarounds();
     satelite_proxy_lib::run()

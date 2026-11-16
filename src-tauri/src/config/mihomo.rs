@@ -48,6 +48,10 @@ pub fn build_mihomo_config(
     nodes: &[ProxyNode],
     opts: &BuildOptions,
 ) -> AppResult<BuiltMihomoConfig> {
+    crate::routing::exceptions::validate(&opts.rule_sets,&opts.rules)?;
+    let scoped = crate::routing::policy::options(opts);
+    let opts = scoped.as_ref();
+    crate::routing::validate_options(opts, crate::core::CoreKind::Mihomo)?;
     let mut skipped: Vec<String> = Vec::new();
     let mut supported: Vec<ProxyNode> = Vec::new();
     for node in nodes {
@@ -188,6 +192,7 @@ pub fn build_mihomo_config(
             pool.clone(),
             pool.first().map(String::as_str),
         ));
+
         filter_group_tags.insert(set.id.clone(), group_tag);
     }
 
@@ -208,11 +213,15 @@ pub fn build_mihomo_config(
             continue;
         }
         let group_tag = rule.smart_outbound_tag();
+        if rule.routing.as_ref().and_then(|m|m.get("selection")).and_then(serde_json::Value::as_str)==Some("kernel") {
+            groups.push(url_test_group(&group_tag,pool.clone(),&probe_url));
+        } else {
         groups.push(select_group(
             &group_tag,
             pool.clone(),
             pool.first().map(String::as_str),
         ));
+        }
         smart_group_tags.insert(rule.id.clone(), group_tag);
     }
 
@@ -253,10 +262,13 @@ pub fn build_mihomo_config(
     if opts.tun_enabled {
         root.insert(str_yaml("tun"), Yaml::Mapping(tun_block()));
     }
-    root.insert(
-        str_yaml("dns"),
-        Yaml::Mapping(build_dns(opts, &opts.rule_sets, &effective_rules)),
-    );
+    let mut dns = build_dns(opts, &opts.rule_sets, &effective_rules);
+    // Mihomo reads static Hosts at the document root, not under dns.
+    if let Some(hosts) = dns.remove(str_yaml("hosts")) {
+        root.insert(str_yaml("hosts"), hosts);
+        dns.insert(str_yaml("use-hosts"), Yaml::Bool(true));
+    }
+    root.insert(str_yaml("dns"), Yaml::Mapping(dns));
     if !opts.extra_inbounds.is_empty() {
         root.insert(str_yaml("listeners"), listeners_block(opts));
     }
@@ -593,7 +605,7 @@ fn rule_to_mihomo(
         RuleType::Domain => format!("DOMAIN,{}", to_ascii_domain(payload)),
         RuleType::DomainSuffix => format!("DOMAIN-SUFFIX,{}", to_ascii_domain(payload)),
         RuleType::DomainKeyword => format!("DOMAIN-KEYWORD,{payload}"),
-        RuleType::IpCidr => format!("IP-CIDR,{payload}"),
+        RuleType::IpCidr => format!("{},{payload}",if payload.contains(':'){"IP-CIDR6"}else{"IP-CIDR"}),
         RuleType::Process => format!("PROCESS-NAME,{payload}"),
         RuleType::Geoip => return None,
     };
@@ -623,6 +635,7 @@ fn rule_to_mihomo(
             .map(outbound_tag)
             .unwrap_or_else(|| main_target.to_string()),
     };
+    let matcher=if rule.routing.as_ref().and_then(|x|x.get("condition")).is_some_and(|c|!c.is_null()){crate::routing::conditions::mihomo(&crate::routing::conditions::expression(rule))}else{matcher};
     Some(format!("{matcher},{target}"))
 }
 
@@ -722,7 +735,7 @@ fn build_dns(opts: &BuildOptions, sets: &[RuleSet], effective_rules: &[Rule]) ->
             }
             continue;
         }
-        for rule in set.rules.iter().filter(|r| r.enabled) {
+        for rule in crate::routing::dns_projection(&set.rules).iter().filter(|r| r.enabled) {
             if set.strategy != RuleSetStrategy::Filter && !effective_ids.contains(rule.id.as_str())
             {
                 continue;
@@ -1401,6 +1414,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: AutoSelectMode::Off,
             probe_url: String::new(),
             find_process: true,
@@ -2412,20 +2426,22 @@ Dh8aZf9uMe34poL6mGQxVWTsiVWSiQbcgOzxHI8Bu6Vebx4=
             dns["fallback"].is_null(),
             "cross-pool fallback must not be emitted"
         );
-        assert_eq!(dns["default-nameserver"][0].as_str(), Some("223.5.5.5"));
-        assert_eq!(dns["default-nameserver"][1].as_str(), Some("119.29.29.29"));
+        assert_eq!(dns["default-nameserver"][0].as_str(), Some("1.1.1.1"));
+        assert_eq!(dns["default-nameserver"][1].as_str(), Some("8.8.8.8"));
         // Node hostnames must resolve via the dedicated plain-UDP pool —
         // not the DoH default (chicken-and-egg with unreachable proxies).
         assert_eq!(
             dns["proxy-server-nameserver"][0].as_str(),
-            Some("223.5.5.5")
+            Some("1.1.1.1")
         );
         let policy = dns["nameserver-policy"]["+.cn-site.com"]
             .as_sequence()
             .unwrap();
-        assert_eq!(policy[0].as_str(), Some("223.5.5.5"));
+        assert_eq!(policy[0].as_str(), Some("1.1.1.1"));
         assert_eq!(policy.len(), 2);
-        assert_eq!(dns["hosts"]["example.test"].as_str(), Some("1.2.3.4"));
+        assert_eq!(doc["hosts"]["example.test"].as_str(), Some("1.2.3.4"));
+        assert!(dns["hosts"].is_null());
+        assert_eq!(dns["use-hosts"].as_bool(), Some(true));
 
         // Direct outbound mode egresses everything direct — remote DoH
         // drops the proxy-egress tag there.

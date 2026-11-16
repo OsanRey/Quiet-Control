@@ -1,3 +1,4 @@
+import { ruleSetName } from "../quiet-control/ruleNames";
 import {
   Fragment,
   useCallback,
@@ -1498,7 +1499,7 @@ export function RulesPage({ embedded = false }: Props) {
 
   async function onDeleteSet(target: RuleSetSummary | null | undefined = viewSet) {
     if (!target || busy) return;
-    if (!confirm(t("rules.deleteSetConfirm", { name: target.name }))) return;
+    if (!confirm(t("rules.deleteSetConfirm", { name: ruleSetName(target) }))) return;
     setBusy(true);
     setError(null);
     try {
@@ -1669,7 +1670,7 @@ export function RulesPage({ embedded = false }: Props) {
               ⋮⋮
             </span>
             <span className="ruleset-prio muted">{setCards.length + 1}</span>
-            <span className="ruleset-name">{s.name}</span>
+            <span className="ruleset-name">{ruleSetName(s)}</span>
             {s.remote &&
               (remoteBusyIds.has(s.id) ||
                 s.remote.download_status === "downloading") && (
@@ -1710,7 +1711,7 @@ export function RulesPage({ embedded = false }: Props) {
               <button
                 type="button"
                 className="rule-menu-trigger"
-                aria-label={t("rules.setMenuAria", { name: s.name })}
+                aria-label={t("rules.setMenuAria", { name: ruleSetName(s) })}
                 aria-haspopup="menu"
                 aria-expanded={menuSetId === s.id}
                 onClick={(e) => {
@@ -3020,7 +3021,7 @@ export function RulesPage({ embedded = false }: Props) {
                   ) : (
                     <span className="edit-set-status-warn">
                       {editSetTarget.remote
-                        ? `${t("rules.batchRemoteHint", { name: editSetTarget.name })} ${strategyLabel(editSetRouteTarget)}`
+                        ? `${t("rules.batchRemoteHint", { name: ruleSetName(editSetTarget) })} ${strategyLabel(editSetRouteTarget)}`
                         : `${t("rules.batchHint", {
                             name: editSetTarget.name,
                             n: editSetTarget.rule_count,

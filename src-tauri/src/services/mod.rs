@@ -4,4 +4,6 @@ pub mod dns_diag;
 pub mod exit_ip;
 pub mod http_body;
 pub mod import;
+pub mod subscription_http;
 pub mod latency;
+pub mod profile_probe;

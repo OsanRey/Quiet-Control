@@ -58,3 +58,34 @@ nul
 assets/icon/*
 !assets/icon/ic_launcher-web.png
 !assets/icon/ic_launcher-mac.png
+
+# Local portable data and private acceptance inputs
+/data/
+/config/
+/webview/
+/webview-runtime/
+/qa-inputs/
+/private-*/
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.dmp
+*.bundle
+*.iso
+*.vmdk
+*.vmem
+*.vmss
+*.vmsn
+*.ova
+*.zip
+*.7z
+/release-artifacts/
+__pycache__/
+*.pyc
+
+# Local historical acceptance evidence stays outside public source history
+/docs/quiet-control/
+/docs/runtime/
+/.claude/

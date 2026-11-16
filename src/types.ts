@@ -183,6 +183,7 @@ export interface SubscriptionDetail {
   traffic?: SubscriptionTraffic | null;
   /** Custom User-Agent for URL fetches. Empty/absent = built-in default. */
   user_agent?: string | null;
+  http?: SubscriptionHttp;
 }
 
 export interface SubscriptionUrlEntry {
@@ -361,6 +362,8 @@ export type TransportDetail =
   | { type: "xhttp"; path?: string; host?: string; mode?: string; extra?: string };
 
 export interface ProxyNode {
+  retained?: boolean;
+  last_probe?: {latency_ms?:number|null;tested_at:number;method:string;error?:string|null}|null;
   id: string;
   name: string;
   protocol: string;
@@ -507,6 +510,8 @@ export interface ExtraInbound {
 }
 
 export interface AppSettings {
+  last_manual_node_id?: string | null;
+  retained_node_ids?: string[];
   mixed_port: number;
   /** Main mixed inbound listens on 0.0.0.0 instead of 127.0.0.1. */
   allow_lan?: boolean;
@@ -539,6 +544,7 @@ export interface AppSettings {
   /** rule | global | direct */
   outbound_mode?: OutboundMode;
   /** route.final in Rule mode: proxy | direct | block */
+  selected_apps_only?: boolean;
   route_final?: "proxy" | "direct" | "block" | string;
   /** Close window → tray (keep process + core). */
   close_to_tray?: boolean;
@@ -554,6 +560,8 @@ export interface AppSettings {
   locale?: string;
   /** UI theme: aerospace | day */
   theme?: string;
+  /** Durable Quiet Control preference; absent in legacy stores. */
+  quiet_theme?: "dark" | "light" | "system" | null;
   /** UI accent (brand/primary color) preset id, e.g. green | blue | purple ... */
   accent?: string;
   /** Background glow color: "accent" (follow) | preset id | #rrggbb */
@@ -679,7 +687,14 @@ export interface NetworkDiagnosticsResult {
   issues: DiagnosticIssue[];
 }
 
+export interface SplitTrafficBucket {upload_total:number;download_total:number;upload_speed:number;download_speed:number}
+export interface SplitTraffic {available:boolean;source:string;vpn:SplitTrafficBucket;direct:SplitTrafficBucket;unknown:SplitTrafficBucket;epoch:number;partial:boolean}
 export interface ProxyStatus {
+  actual_node_id?: string | null;
+  actual_node_name?: string | null;
+  selected_node_name?: string | null;
+  selected_node_id?: string | null;
+  split_traffic?: SplitTraffic;
   running: boolean;
   core_state: CoreState;
   system_proxy: boolean;
@@ -958,3 +973,7 @@ export interface LiveConnectionBatch {
   unchanged: boolean;
   full: boolean;
 }
+
+export type SubscriptionClient = "auto" | "happ" | "v2ray_tun" | "mihomo" | "singbox" | "custom";
+export interface SubscriptionHttp { client: SubscriptionClient; accept?: string | null; send_device_id: boolean; device_id?: string | null; last_success?: SubscriptionClient | null; }
+export interface SubscriptionCheck { usable: boolean; successful_client?: SubscriptionClient | null; retry_after_seconds?: number | null; attempts: {client: SubscriptionClient; http_status?: number | null; format?: string | null; recognized: number; accepted?: number; excluded?: number; device?: {id_sent: boolean; active: boolean; not_supported: boolean; max_devices_reached: boolean; legacy_limit: boolean} | null; skipped: number; result: string; supported: number[]}[]; }

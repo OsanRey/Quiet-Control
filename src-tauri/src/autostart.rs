@@ -117,7 +117,7 @@ pub fn set_launch_at_login(enabled: bool) -> AppResult<()> {
                 "add",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v",
-                "SateliteProxy",
+                "SateliteResearch",
                 "/t",
                 "REG_SZ",
                 "/d",
@@ -139,7 +139,7 @@ pub fn set_launch_at_login(enabled: bool) -> AppResult<()> {
                 "delete",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v",
-                "SateliteProxy",
+                "SateliteResearch",
                 "/f",
             ]);
             #[cfg(target_os = "windows")]

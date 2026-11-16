@@ -390,6 +390,7 @@ pub fn active_core_version(
 }
 
 pub fn read_version_of_binary(kind: CoreKind, bin: &Path) -> AppResult<String> {
+    super::trust::verify_binary(kind, bin)?;
     if !bin.exists() {
         return Err(AppError::Core(format!(
             "{} binary not found",

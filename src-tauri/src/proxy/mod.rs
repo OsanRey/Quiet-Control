@@ -94,6 +94,11 @@ fn cleanup_targets(marker: Option<&ProxyOwnership>, current_port: u16) -> Vec<(S
 /// Clean an OS proxy left behind by an unclean exit. The persisted marker is
 /// authoritative; the current mixed port is also checked for pre-marker releases.
 pub fn cleanup_stale_owned_proxy(app_data_dir: &Path, current_port: u16) -> AppResult<bool> {
+    #[cfg(windows)]
+    if let Some(restored) = windows::recover_stale_journal()? {
+        clear_ownership(app_data_dir)?;
+        return Ok(restored);
+    }
     let backend = create_system_proxy();
     let marker_file_exists = owner_path(app_data_dir).exists();
     let marker = load_ownership(app_data_dir);
@@ -173,3 +178,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(windows)]
+pub fn run_recovery_watchdog(pid: u32) -> i32 { windows::run_recovery_watchdog(pid) }

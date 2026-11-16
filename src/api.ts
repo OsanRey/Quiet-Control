@@ -55,6 +55,7 @@ export function addSubscriptionUrl(
   autoUpdate = false,
   autoUpdateIntervalMin = 1440,
   userAgent?: string | null,
+  http?: import("./types").SubscriptionHttp,
 ) {
   return invoke<ImportResult>("add_subscription_url", {
     name,
@@ -63,6 +64,7 @@ export function addSubscriptionUrl(
     autoUpdate,
     autoUpdateIntervalMin,
     userAgent: userAgent ?? null,
+    http: http ?? null,
   });
 }
 
@@ -139,6 +141,7 @@ export function updateSubscription(input: {
   autoUpdate?: boolean | null;
   autoUpdateIntervalMin?: number | null;
   userAgent?: string | null;
+  http?: import("./types").SubscriptionHttp;
 }) {
   return invoke<ImportResult>("update_subscription", {
     id: input.id,
@@ -153,6 +156,7 @@ export function updateSubscription(input: {
     autoUpdate: input.autoUpdate ?? null,
     autoUpdateIntervalMin: input.autoUpdateIntervalMin ?? null,
     userAgent: input.userAgent ?? null,
+    http: input.http ?? null,
   });
 }
 
@@ -185,8 +189,8 @@ export function listSubscriptionNodes(id: string) {
   return invoke<ProxyNode[]>("list_subscription_nodes", { id });
 }
 
-export function listAllNodes() {
-  return invoke<ProxyNode[]>("list_all_nodes");
+export function listAllNodes(includeInactive = false) {
+  return invoke<ProxyNode[]>("list_all_nodes", {includeInactive});
 }
 
 export function listNodesPage(query: string, sortMode: string, offset = 0, limit = 200) {
@@ -382,6 +386,7 @@ export interface SettingsUpdatePayload {
   closeConnectionsOnSwitch?: boolean | null;
   locale?: string | null;
   theme?: string | null;
+  quietTheme?: "dark" | "light" | "system";
   accent?: string | null;
   /** Background glow: "accent" | preset id | #rrggbb */
   glowColor?: string | null;
@@ -447,6 +452,7 @@ function scheduleSettingsWrite() {
       closeConnectionsOnSwitch: payload.closeConnectionsOnSwitch ?? null,
       locale: payload.locale ?? null,
       theme: payload.theme ?? null,
+      quietTheme: payload.quietTheme ?? null,
       accent: payload.accent ?? null,
       glowColor: payload.glowColor ?? null,
       heroStyle: payload.heroStyle ?? null,
@@ -491,7 +497,7 @@ export function regenerateApiSecret() {
 }
 
 export function setCurrentNode(nodeId: string) {
-  return keepSettings(invoke<AppSettings>("set_current_node", { nodeId }));
+  return keepSettings(trackCoreBusy(invoke<AppSettings>("set_current_node", { nodeId })));
 }
 
 export interface SmartSwitchNowResult {
@@ -707,6 +713,14 @@ export function pingNodesLatency(
     onResult: latencyResultChannel(onResult),
   };
   return invoke<LatencyBatchResult>("ping_nodes_latency", args);
+}
+
+/** Read/probe saved nodes without enabling their profile or switching selection. */
+export function testSubscriptionNodes(id: string, ids: string[], throughProxy: boolean,
+  onResult?: (r: LatencyResult) => void) {
+  return invoke<LatencyBatchResult>("test_subscription_nodes", {
+    id, ids, throughProxy, onResult: latencyResultChannel(onResult),
+  });
 }
 
 /** Same TCP probe, for nodes extracted from the selected custom sing-box config (results not persisted). */
@@ -1060,3 +1074,22 @@ export function listRequestFailures(
 export function clearRequestHistory() {
   return invoke<void>("clear_request_history");
 }
+// Quiet Control routing transactions. Drafts never invoke the legacy auto-apply commands.
+export const routingWorkspace=()=>invoke<import('./quiet-control/routing/model').Workspace>('routing_workspace');
+export const routingSaveDraft=(draft:import('./quiet-control/routing/model').RoutingDraft)=>invoke<void>('routing_save_draft',{draft});
+export const routingAnalyze=(document:import('./quiet-control/routing/model').RoutingDocument)=>invoke<{issues:import('./quiet-control/routing/model').RoutingIssue[]}>('routing_analyze',{document});
+export const routingPredict=(document:import('./quiet-control/routing/model').RoutingDocument,query:{destination:string;process?:string;port?:number;network?:string;inbound?:string})=>invoke<Record<string,unknown>>('routing_predict',{document,query});
+export const routingValidate=(document:import('./quiet-control/routing/model').RoutingDocument)=>invoke<Record<string,unknown>>('routing_validate',{document});
+export const routingApply=(draft:import('./quiet-control/routing/model').RoutingDraft)=>invoke<Record<string,unknown>>('routing_apply',{draft});
+export const routingDiscard=()=>invoke<void>('routing_discard');
+export const routingTemplates=(templates?:import('./quiet-control/routing/model').Template[])=>invoke<import('./quiet-control/routing/model').Template[]>('routing_templates',{templates:templates??null});
+export type RoutingProcess={ProcessName:string;Path:string|null;Id?:number};
+export const routingProcesses=()=>invoke<RoutingProcess[]|RoutingProcess|null>('routing_processes');
+export const routingExport=(template:import('./quiet-control/routing/model').Template,path:string)=>invoke<void>('routing_export',{template,path});
+export const routingPrepareSource=(name:string,url:string,bytes?:number[],previous?:import('./types').RuleSet)=>invoke<import('./quiet-control/routing/model').RoutingSet>('routing_prepare_source',{name,url,bytes:bytes??null,previous:previous??null});
+
+export function checkSubscription(url: string, viaProxy: boolean, userAgent: string, http: import("./types").SubscriptionHttp) {
+ return invoke<import("./types").SubscriptionCheck>("check_subscription", {url, viaProxy, userAgent: userAgent || null, http});
+}
+
+export const prepareNodeSelection=(nodeId:string)=>keepSettings(invoke<AppSettings>("prepare_node_selection",{nodeId}));

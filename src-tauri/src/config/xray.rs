@@ -79,6 +79,10 @@ fn apply_xray_tls_fragment(outbounds: &mut Vec<Value>) {
 }
 
 pub fn build_xray_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResult<BuiltConfig> {
+    crate::routing::exceptions::validate(&opts.rule_sets,&opts.rules)?;
+    let scoped = crate::routing::policy::options(opts);
+    let opts = scoped.as_ref();
+    crate::routing::validate_options(opts, crate::core::CoreKind::Xray)?;
     let mut supported: Vec<ProxyNode> = nodes
         .iter()
         .filter(|n| CoreKind::Xray.supports(n.protocol))
@@ -208,7 +212,12 @@ pub fn build_xray_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResult<
         apply_xray_tls_fragment(&mut outbounds);
     }
 
-    outbounds.push(json!({ "tag": "direct", "protocol": "freedom" }));
+    let mut direct = json!({ "tag": "direct", "protocol": "freedom" });
+    if opts.dns.effective_hosts().enabled {
+        // Freedom defaults to OS resolution (AsIs), which skips Xray dns.hosts.
+        direct["settings"] = json!({"domainStrategy": "UseIP"});
+    }
+    outbounds.push(direct);
     outbounds.push(json!({ "tag": "block", "protocol": "blackhole" }));
     if opts.tun_enabled {
         // Hand raw UDP/53 traffic arriving through the tun inbound to the
@@ -618,6 +627,10 @@ fn rule_to_xray(
             obj.insert("ip".into(), json!([ip_entry(payload)]));
         }
     }
+    if rule.routing.as_ref().and_then(|x|x.get("condition")).is_some_and(|c|!c.is_null()) {
+        obj.retain(|k,_|k=="type");
+        obj.extend(crate::routing::conditions::xray(&crate::routing::conditions::expression(rule)).as_object().unwrap().clone());
+    }
     if let Some(balancer) = smart_balancer {
         obj.insert("balancerTag".into(), json!(balancer));
     } else {
@@ -840,7 +853,7 @@ fn build_dns(
             }
             continue;
         }
-        for rule in set.rules.iter().filter(|r| r.enabled) {
+        for rule in crate::routing::dns_projection(&set.rules).iter().filter(|r| r.enabled) {
             // Only rules that actually reach routing carry DNS meaning.
             // Filter sets and explicit node-pool sets are excluded from
             // effective_rules upstream (they route via their pool balancer
@@ -1466,6 +1479,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: String::new(),
             find_process: true,
@@ -2317,6 +2331,8 @@ mod tests {
         }];
         let built = build_xray_config(&nodes, &opts).expect("build");
         assert_eq!(built.value["dns"]["hosts"]["local.test"], "10.0.0.8");
+        let direct = built.value["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == "direct").unwrap();
+        assert_eq!(direct["settings"]["domainStrategy"], "UseIP");
     }
 
     #[test]
@@ -3194,6 +3210,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: String::new(),
             find_process: true,

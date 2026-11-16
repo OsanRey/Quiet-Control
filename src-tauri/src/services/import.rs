@@ -56,119 +56,29 @@ pub async fn import_from_url_with_id(
     mixed_port: Option<u16>,
     user_agent: Option<String>,
 ) -> AppResult<ImportOutcome> {
-    let url = url.trim().to_string();
-    if url.is_empty() {
-        return Err(AppError::Fetch("url is empty".into()));
-    }
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(AppError::Fetch(
-            "url must start with http:// or https://".into(),
-        ));
-    }
-
-    let custom_ua = user_agent
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    // Many panels only attach `subscription-userinfo` when UA looks like Clash;
-    // some also substring-whitelist `clash-verge` or `flclash`. See
-    // `subscription_user_agent` for the exact shape.
-    let ua = custom_ua.clone().unwrap_or_else(subscription_user_agent);
-
-    let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(45))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .user_agent(ua);
-
-    if via_proxy {
-        let port = mixed_port.unwrap_or(2080);
-        let proxy_url = format!("http://127.0.0.1:{port}");
-        let proxy = reqwest::Proxy::all(&proxy_url)
-            .map_err(|e| AppError::Fetch(format!("invalid proxy {proxy_url}: {e}")))?;
-        builder = builder.proxy(proxy);
-    } else {
-        builder = builder.no_proxy();
-    }
-
-    let client = builder
-        .build()
-        .map_err(|e| AppError::Fetch(e.to_string()))?;
-
-    let response = client
-        .get(&url)
-        .header(reqwest::header::ACCEPT, "*/*")
-        .send()
-        .await
-        .map_err(|e| {
-            if via_proxy {
-                AppError::Fetch(format!(
-                    "via proxy failed ({e}). 请确认已启动代理核心，且 mixed 端口正确"
-                ))
-            } else {
-                AppError::Fetch(e.to_string())
-            }
-        })?;
-
-    if !response.status().is_success() {
-        return Err(AppError::Fetch(format!(
-            "http status {}",
-            response.status()
-        )));
-    }
-
-    let traffic = parse_subscription_userinfo(response.headers());
-    // Default label from Content-Disposition (RFC 5987 filename*), same as FlClash.
-    let disposition_name = parse_content_disposition_filename(response.headers());
-
-    let bytes = crate::services::http_body::read_limited(
-        response,
-        MAX_BODY_BYTES,
-        format!("body too large (max {MAX_BODY_BYTES} bytes)"),
-    )
-    .await
-    .map_err(|e| AppError::Fetch(e.to_string()))?;
-
-    // Name priority: user input > Content-Disposition filename* > URL host
-    let display_name = name
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().to_string())
-        .or(disposition_name)
-        .unwrap_or_else(|| name_from_url(&url));
-    let content = String::from_utf8_lossy(&bytes).into_owned();
-    let raw_body = content.clone();
-    let mut outcome = tokio::task::spawn_blocking(move || -> AppResult<ImportOutcome> {
-        let body_traffic = parse_userinfo_from_content(&content);
-        let parsed = parse_subscription(&content)?;
-        let mut outcome = build_outcome(
-            display_name,
-            SubscriptionSource::Url { url },
-            parsed,
-            existing_id,
-            true,
-        );
-        // URL body comment > remark nodes; HTTP headers are merged below.
-        outcome.subscription.traffic =
-            SubscriptionTraffic::merge(body_traffic, outcome.subscription.traffic);
-        Ok(outcome)
-    })
-    .await
-    .map_err(|error| AppError::Fetch(format!("subscription parse task: {error}")))??;
-    outcome.subscription.via_proxy = via_proxy;
-    outcome.subscription.user_agent = custom_ua;
-    // Priority: HTTP header > body comment > remark node names
-    outcome.subscription.traffic =
-        SubscriptionTraffic::merge(traffic, outcome.subscription.traffic);
-    outcome.raw_body = Some(raw_body);
-    Ok(outcome)
+    import_url_with_options(name,url,existing_id,via_proxy,mixed_port,user_agent,Default::default()).await
 }
 
-/// UA used when fetching subscriptions (must look like Clash for many panels).
-fn subscription_user_agent() -> String {
-    // FlClash shape plus the verbatim `flclash/1` token: covers panels that
-    // substring-match either `clash-verge` or `flclash` in the UA.
-    "satelite-proxy/0.1 clash-verge/v2.5 flclash/1".to_string()
+pub async fn import_url_with_options(
+    name: Option<String>, url: String, existing_id: Option<String>, via_proxy: bool,
+    mixed_port: Option<u16>, user_agent: Option<String>, mut http: crate::domain::SubscriptionHttp,
+) -> AppResult<ImportOutcome> {
+    let url=url.trim().to_string();
+    let custom_ua=user_agent.map(|s|s.trim().to_string()).filter(|s|!s.is_empty());
+    let (report,fetched)=crate::services::subscription_http::fetch(&url,via_proxy,mixed_port,custom_ua.as_deref(),&http).await;
+    let fetched=fetched.ok_or_else(||AppError::Fetch(crate::services::subscription_http::safe_error(&report)))?;
+    let traffic=parse_subscription_userinfo(&fetched.headers);
+    let display_name=name.filter(|s|!s.trim().is_empty()).map(|s|s.trim().to_string())
+        .or_else(||parse_content_disposition_filename(&fetched.headers)).unwrap_or_else(||name_from_url(&url));
+    let body_traffic=parse_userinfo_from_content(&fetched.body);
+    let mut outcome=build_outcome(display_name,SubscriptionSource::Url{url},fetched.parsed,existing_id,true);
+    http.last_success=Some(fetched.client);
+    outcome.subscription.http=http;
+    outcome.subscription.via_proxy=via_proxy;
+    outcome.subscription.user_agent=custom_ua;
+    outcome.subscription.traffic=SubscriptionTraffic::merge(traffic,SubscriptionTraffic::merge(body_traffic,SubscriptionTraffic::merge(fetched.remark_traffic,outcome.subscription.traffic)));
+    outcome.raw_body=Some(fetched.body);
+    Ok(outcome)
 }
 
 /// Parse `Content-Disposition` for a display name.
@@ -462,6 +372,12 @@ fn parse_userinfo_str(raw: &str) -> Option<SubscriptionTraffic> {
 fn is_remark_name(name: &str) -> bool {
     let mut traffic = SubscriptionTraffic::default();
     apply_remark_name(name, &mut traffic)
+}
+
+pub(crate) fn traffic_from_remarks(nodes: &[ProxyNode]) -> Option<SubscriptionTraffic> {
+    let mut traffic=SubscriptionTraffic::default();
+    for node in nodes {apply_remark_name(&node.name,&mut traffic);}
+    if traffic.is_empty(){None}else{Some(traffic)}
 }
 
 fn split_remark_nodes(nodes: Vec<ProxyNode>) -> (Option<SubscriptionTraffic>, Vec<ProxyNode>) {
@@ -868,6 +784,7 @@ mod tests {
             auto_update_interval_min: 1440,
             traffic: None,
             user_agent: None,
+            http: Default::default(),
         });
         let second = unique_subscription_id(&store, subscription_id(&source));
         assert_ne!(second, base);
@@ -902,7 +819,7 @@ mod tests {
 
     #[test]
     fn subscription_ua_contains_clash_verge() {
-        let ua = subscription_user_agent();
+        let ua = crate::services::subscription_http::headers_for(crate::domain::SubscriptionClient::Auto,None).0;
         assert!(ua.to_ascii_lowercase().contains("clash-verge"), "ua={ua}");
         assert!(ua.to_ascii_lowercase().contains("flclash"), "ua={ua}");
     }
@@ -1260,6 +1177,7 @@ fn build_outcome(
         auto_update_interval_min: 1440,
         traffic: remark_traffic,
         user_agent: None,
+        http: Default::default(),
     };
 
     // Re-hash node ids on the subscription id + backend identity
@@ -1424,6 +1342,7 @@ pub(crate) fn format_label(f: SubscriptionFormat) -> String {
         SubscriptionFormat::UriList => "uri_list".into(),
         SubscriptionFormat::Base64UriList => "base64_uri_list".into(),
         SubscriptionFormat::SingboxJson => "singbox_json".into(),
+        SubscriptionFormat::XrayJson => "xray_json".into(),
         SubscriptionFormat::Manual => "manual".into(),
     }
 }

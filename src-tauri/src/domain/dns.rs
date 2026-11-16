@@ -22,7 +22,7 @@ pub const MAX_REMOTE_DNS_ENTRIES: usize = 8;
 
 /// Domestic pool: plaintext UDP, always direct (plus the bootstrap role in
 /// mihomo's `default-nameserver` / `proxy-server-nameserver`).
-pub const DOMESTIC_DNS_POOL: [&str; 2] = ["223.5.5.5", "119.29.29.29"];
+pub const DOMESTIC_DNS_POOL: [&str; 2] = ["1.1.1.1", "8.8.8.8"];
 
 /// Legacy stored value. Resolution modes were removed in schema v3; this is
 /// deserialized only so older stores can still be opened safely.

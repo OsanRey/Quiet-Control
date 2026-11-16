@@ -23,6 +23,7 @@ base64 = "0.22"
 url = "2"
 urlencoding = "2"
 idna = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 thiserror = "2"
 sha2 = "0.10"
 hex = "0.4"

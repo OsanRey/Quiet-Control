@@ -142,6 +142,10 @@ fn parse_http_uri(line: &str) -> Result<ProxyNode, String> {
 
 fn parse_hysteria_uri(line: &str) -> Result<ProxyNode, String> {
     let (url, server, port, name, query) = basic_url_parts(line, "hysteria", Some(443))?;
+    if query.get("version").is_some_and(|v|v=="2") {
+        let normalized=line.replacen("hysteria://","hysteria2://",1);
+        return parse_hysteria2_uri(&normalized);
+    }
     let auth = if !url.username().is_empty() {
         percent_decode(url.username())
     } else {
@@ -583,6 +587,9 @@ fn parse_vless_uri(line: &str) -> Result<ProxyNode, String> {
         .query_pairs()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
+    if query.get("encryption").is_some_and(|value|!value.is_empty() && value!="none") {
+        return Err("unsupported_xray_vless_encryption".into());
+    }
 
     let security = query.get("security").map(|s| s.as_str()).unwrap_or("none");
     let mut tls = if security == "tls" || security == "reality" {

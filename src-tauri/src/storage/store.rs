@@ -27,6 +27,8 @@ pub struct AppStore {
     #[serde(default)]
     pub nodes: Vec<StoredNode>,
     #[serde(default)]
+    pub manual_probe_results: std::collections::BTreeMap<String, super::profile_cache::SavedProbe>,
+    #[serde(default)]
     pub settings: AppSettings,
     /// DNS module (docs/dns.md).
     #[serde(default)]
@@ -92,6 +94,9 @@ impl AppStore {
         let (mut store, source_raw) = Self::load_with_recovery(path, resource_dir)?;
         let schema_before = store.schema_version;
         store.settings.migrate_auto_select();
+        if store.settings.last_manual_node_id.is_none() && store.settings.auto_select==crate::domain::AutoSelectMode::Off {
+            store.settings.last_manual_node_id=store.settings.current_node_id.clone();
+        }
         store.settings.migrate_capture_mode();
         store.settings.migrate_api_secret_enabled();
         store.dns.ensure_rule_sets();
@@ -542,6 +547,7 @@ impl AppStore {
                         continue;
                     }
                     set.rules.push(Rule {
+                        routing: None,
                         id: dns_rule.id,
                         ord: next_ord,
                         rule_type,
@@ -641,15 +647,8 @@ impl AppStore {
         if self.schema_version >= VERSION {
             return;
         }
-        let mut insert_at = 0;
-        for spec in BUILTIN_REMOTE_RULE_SETS.iter() {
-            if self.rule_sets.iter().any(|set| set.id == spec.id) {
-                continue;
-            }
-            self.rule_sets
-                .insert(insert_at, build_builtin_remote_set(spec));
-            insert_at += 1;
-        }
+        // Retired regional presets are never added to a new store. Existing
+        // entries remain until the user reviews and applies the routing draft.
         self.schema_version = VERSION;
     }
 
@@ -761,6 +760,8 @@ impl AppStore {
         if map.is_empty() {
             return;
         }
+        if let Some(id)=self.settings.last_manual_node_id.as_ref().and_then(|id|map.get(id)) {self.settings.last_manual_node_id=Some(id.clone());}
+        self.settings.retained_node_ids=self.settings.retained_node_ids.iter().map(|id|map.get(id).unwrap_or(id).clone()).collect();
         if let Some(new) = self
             .settings
             .current_node_id
@@ -769,6 +770,8 @@ impl AppStore {
         {
             self.settings.current_node_id = Some(new.clone());
         }
+        let probes=std::mem::take(&mut self.manual_probe_results);
+        self.manual_probe_results=probes.into_iter().map(|(id,result)|(map.get(&id).cloned().unwrap_or(id),result)).collect();
         let favorites = std::mem::take(&mut self.favorite_nodes);
         for id in favorites {
             let mapped = map.get(&id).cloned().unwrap_or(id);
@@ -835,6 +838,10 @@ impl AppStore {
         nodes: Vec<ProxyNode>,
     ) -> AppResult<()> {
         let id = sub.id.clone();
+        if sub.source.contributes_nodes() && nodes.is_empty() && self.nodes.iter().any(|n|n.subscription_id==id) {
+            return Err(AppError::Config("subscription.empty_refresh_kept_cache".into()));
+        }
+        let nodes = self.merge_profile_cache(&id, nodes)?;
         self.nodes.retain(|n| n.subscription_id != id);
         if let Some(existing) = self.subscriptions.iter_mut().find(|s| s.id == id) {
             *existing = sub;
@@ -842,14 +849,12 @@ impl AppStore {
             self.subscriptions.push(sub);
         }
         for mut node in nodes {
-            self.apply_node_alias(&mut node);
-            self.nodes.push(StoredNode {
-                subscription_id: id.clone(),
-                node,
-                latency_method: None,
-            });
+            self.apply_node_alias(&mut node.node);
+            self.nodes.push(node);
         }
         self.gc_favorite_nodes();
+        let ids:std::collections::HashSet<_>=self.nodes.iter().map(|n|n.node.id.clone()).collect();
+        self.manual_probe_results.retain(|id,_|ids.contains(id));
         Ok(())
     }
 
@@ -860,6 +865,9 @@ impl AppStore {
             return Err(AppError::NotFound(id.to_string()));
         }
         self.nodes.retain(|n| n.subscription_id != id);
+        let remaining: std::collections::HashSet<_> = self.nodes.iter().map(|n| n.node.id.clone()).collect();
+        self.manual_probe_results.retain(|key, _| remaining.contains(key));
+        self.settings.retained_node_ids.retain(|key| remaining.contains(key));
         if self.settings.runtime_source().singbox_id() == Some(id) {
             self.settings
                 .set_runtime_source(crate::domain::RuntimeSource::Generated);
@@ -957,7 +965,10 @@ impl AppStore {
                 .map(|s| s.id.clone())
                 .collect();
             if enabled.len() > 1 {
-                let keep = enabled[0].clone();
+                let keep = self.settings.current_node_id.as_ref()
+                    .and_then(|id|self.nodes.iter().find(|n|&n.node.id==id))
+                    .map(|n|n.subscription_id.clone()).filter(|id|enabled.contains(id))
+                    .unwrap_or_else(||enabled[0].clone());
                 for s in &mut self.subscriptions {
                     if s.source.contributes_nodes() {
                         s.enabled = s.id == keep;
@@ -1064,6 +1075,7 @@ impl AppStore {
                 }
             });
             if !still {
+                if self.settings.auto_select == crate::domain::AutoSelectMode::Off {return;}
                 self.settings.current_node_id = self.enabled_nodes().first().map(|n| n.id.clone());
             }
         }
@@ -1976,9 +1988,8 @@ impl AppStore {
         resource_dir: Option<&Path>,
         set_id: &str,
     ) -> AppResult<(RuleSet, Vec<PathBuf>)> {
-        let spec = builtin_remote_spec(set_id)
-            .ok_or_else(|| AppError::Config("只能重置内置规则集".into()))?;
-        self.reset_builtin_remote_set(app_data_dir, resource_dir, spec)
+        let _ = (app_data_dir, resource_dir, set_id);
+        Err(AppError::Config("routing.presets.retired".into()))
     }
 
     /// Restore one bundled remote rule set to factory defaults (name, url,
@@ -2040,12 +2051,8 @@ impl AppStore {
             .map(|set| set.id.clone())
             .collect();
         self.rule_sets.retain(|set| !is_builtin_remote_id(&set.id));
-        let mut restored = Vec::new();
-        for (index, spec) in BUILTIN_REMOTE_RULE_SETS.iter().enumerate() {
-            let set = crate::builtin_remote_rules::restore_set(app_data_dir, resource_dir, spec);
-            self.rule_sets.insert(index, set.clone());
-            restored.push(set);
-        }
+        let restored = Vec::new();
+        let _ = resource_dir; // Reset no longer resurrects regional presets.
         let stable: std::collections::HashSet<PathBuf> = BUILTIN_REMOTE_RULE_SETS
             .iter()
             .map(|spec| crate::builtin_remote_rules::stable_cache_path(app_data_dir, spec))
@@ -2097,6 +2104,9 @@ fn store_from_json(value: Value) -> AppStore {
 
     let (nodes, retained_nodes) = split_known_items::<StoredNode>(obj.get("nodes"));
     store.nodes = nodes;
+    if let Some(results)=obj.get("manual_probe_results") {
+        store.manual_probe_results=serde_json::from_value(results.clone()).unwrap_or_default();
+    }
     store.retained_nodes = retained_nodes;
 
     let (rules, retained_rules) = split_known_items::<Rule>(obj.get("rules"));
@@ -2311,7 +2321,7 @@ fn prune_corrupt_snapshots(directory: &Path, keep: usize) -> std::io::Result<()>
     Ok(())
 }
 
-fn replace_file(path: &Path, raw: &[u8]) -> AppResult<()> {
+pub(crate) fn replace_file(path: &Path, raw: &[u8]) -> AppResult<()> {
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -2970,6 +2980,7 @@ mod tests {
             auto_update_interval_min: 1440,
             traffic: None,
             user_agent: None,
+            http: Default::default(),
         }
     }
 
@@ -3402,6 +3413,7 @@ mod tests {
         legacy.builtin = true;
         legacy.ownership = RuleSetOwnership::Builtin;
         store.rule_sets.push(legacy);
+        store.rule_sets.push(build_builtin_remote_set(&BUILTIN_REMOTE_RULE_SETS[0]));
         store.migrate_builtin_remote_rule_sets();
         let builtin_remote_id = BUILTIN_REMOTE_RULE_SETS[0].id.to_string();
         assert!(store.get_rule_set(&builtin_remote_id).is_some());
@@ -3543,33 +3555,12 @@ mod tests {
     }
 
     #[test]
-    fn v7_migration_runs_once_and_orders_specs_first() {
-        let mut store = AppStore {
-            schema_version: 6,
-            ..AppStore::default()
-        };
-        store
-            .rule_sets
-            .push(RuleSet::new_user("已有规则", Vec::new()));
-
-        store.migrate_builtin_remote_rule_sets();
-        assert_eq!(store.schema_version, 7);
-        let ids: Vec<&str> = store.rule_sets.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(
-            ids[..3],
-            BUILTIN_REMOTE_RULE_SETS
-                .iter()
-                .map(|spec| spec.id)
-                .collect::<Vec<_>>()[..]
-        );
-        assert_eq!(store.rule_sets.len(), 4);
-
-        // Idempotent: a user deletion after v7 is never undone by reload.
-        store
-            .delete_rule_set(BUILTIN_REMOTE_RULE_SETS[1].id)
-            .unwrap();
-        store.migrate_builtin_remote_rule_sets();
-        assert_eq!(store.rule_sets.len(), 3);
+    fn v7_migration_does_not_seed_retired_regional_presets() {
+        let mut store=AppStore{schema_version:6,..AppStore::default()};
+        store.rule_sets.push(RuleSet::new_user("User",Vec::new()));
+        store.migrate_builtin_remote_rule_sets();assert_eq!(store.schema_version,7);assert_eq!(store.rule_sets.len(),1);
+        store.rule_sets.push(build_builtin_remote_set(&BUILTIN_REMOTE_RULE_SETS[0]));store.schema_version=6;
+        store.migrate_builtin_remote_rule_sets();assert_eq!(store.rule_sets.len(),2,"existing settings await explicit apply");
     }
 
     #[test]
@@ -3633,102 +3624,17 @@ mod tests {
     }
 
     #[test]
-    fn reset_all_builtin_restores_only_the_three_remote_sets() {
-        let dir = std::env::temp_dir().join(format!(
-            "satelite-reset-all-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut store = AppStore::default();
-        let user = RuleSet::new_remote(
-            "用户远程",
-            "https://example.com/rules.json",
-            RuleTarget::Proxy,
-        );
-        let user_id = user.id.clone();
-        store.rule_sets.push(user);
-        let mut legacy = RuleSet::new_user("旧内置", Vec::new());
-        legacy.id = "builtin-ruleset".into();
-        legacy.builtin = true;
-        legacy.ownership = RuleSetOwnership::Builtin;
-        store.rule_sets.push(legacy);
-        store.migrate_builtin_remote_rule_sets();
-
-        let (restored, _stale, export_ids) = store.reset_all_builtin_rule_sets(&dir, None);
-
-        assert_eq!(restored.len(), 3);
-        let ids: Vec<&str> = store.rule_sets.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids.len(), 5);
-        assert!(ids[..3].iter().all(|id| is_builtin_remote_id(id)));
-        // User set and the legacy builtin list set both survive the reset.
-        assert!(store.get_rule_set(&user_id).is_some());
-        assert!(store.get_rule_set("builtin-ruleset").is_some());
-        assert!(!export_ids.iter().any(|id| id == "builtin-ruleset"));
-        // With bundled copies available the sets reference their stable
-        // cache file; without them they stay on the URL fallback.
-        for set in &restored {
-            let spec = crate::domain::builtin_remote_spec(&set.id).unwrap();
-            match set.remote.as_ref().unwrap().local_path.as_deref() {
-                Some(path) => {
-                    let stable = crate::builtin_remote_rules::stable_cache_path(&dir, spec);
-                    assert_eq!(path, stable.to_str().unwrap());
-                    assert!(stable.is_file());
-                }
-                None => {}
-            }
-        }
-
-        let _ = fs::remove_dir_all(&dir);
+    fn reset_all_removes_retired_presets_without_resurrecting_them() {
+        let mut store=AppStore::default();let user=RuleSet::new_user("User",Vec::new());let id=user.id.clone();store.rule_sets.push(user);
+        for spec in &BUILTIN_REMOTE_RULE_SETS {store.rule_sets.push(build_builtin_remote_set(spec));}
+        let (restored,_,ids)=store.reset_all_builtin_rule_sets(Path::new("unused"),None);
+        assert!(restored.is_empty());assert_eq!(ids.len(),3);assert_eq!(store.rule_sets.len(),1);assert!(store.get_rule_set(&id).is_some());
     }
 
     #[test]
-    fn reset_single_builtin_remote_restores_defaults_and_keeps_enabled() {
-        let dir = std::env::temp_dir().join(format!(
-            "satelite-reset-one-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut store = AppStore::default();
-        store.migrate_builtin_remote_rule_sets();
-        let spec = &BUILTIN_REMOTE_RULE_SETS[2];
-        {
-            let set = store
-                .rule_sets
-                .iter_mut()
-                .find(|s| s.id == spec.id)
-                .unwrap();
-            set.name = "改名".into();
-            set.enabled = false;
-            set.remote.as_mut().unwrap().update_interval = "disabled".into();
-        }
-
-        let (restored, _stale) = store
-            .reset_rule_set(&dir, None, spec.id)
-            .expect("reset builtin remote set");
-
-        assert_eq!(restored.name, spec.name);
-        assert!(!restored.enabled, "user's disabled state survives reset");
-        assert_eq!(restored.remote.as_ref().unwrap().update_interval, "24h");
-        assert_eq!(
-            store
-                .rule_sets
-                .iter()
-                .find(|s| s.id == spec.id)
-                .unwrap()
-                .name,
-            spec.name
-        );
-
-        // Legacy builtin list ids are no longer resettable at all.
-        assert!(store.reset_rule_set(&dir, None, BUILTIN_SET_ID).is_err());
-
-        let _ = fs::remove_dir_all(&dir);
+    fn single_reset_cannot_resurrect_retired_presets() {
+        let mut store=AppStore::default();let id=BUILTIN_REMOTE_RULE_SETS[2].id;
+        assert!(store.reset_rule_set(Path::new("unused"),None,id).is_err());assert!(store.rule_sets.is_empty());
     }
 
     #[test]
@@ -3832,38 +3738,21 @@ mod tests {
     }
 
     #[test]
-    fn favorite_survives_rename_and_resubscribe_but_not_a_ip_port_change() {
-        // Business intent: a favorite is keyed on the node's stable content-hash
-        // id (server/port/protocol/credentials), so a subscription refresh that
-        // only changes display name/remark must NOT lose the favorite — but a
-        // refresh where the node's underlying id truly changes (ip/port/cred
-        // rotated) has nothing left to point at and must be garbage-collected,
-        // otherwise `favorite_nodes` grows with ids no node will ever have again.
-        let mut store = AppStore::default();
-        store
-            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01")])
-            .unwrap();
+    fn favorite_survives_rename_and_retains_a_removed_backend_until_explicit_removal() {
+        // Stage 4.3 retains a removed favorite, with a warning, rather than
+        // assigning its star to a different backend or silently discarding it.
+        let mut store=AppStore::default();
+        store.upsert_subscription(sample_url_sub("s"),vec![sample_hy2("a","HK-01")]).unwrap();
         assert!(store.toggle_favorite_node("a").unwrap());
-
-        // Airport renamed the node under the same subscription refresh — id
-        // ("a") stays the same in this test because id is caller-supplied here,
-        // mirroring how `ProxyNode::compute_id` would keep it stable in
-        // production since name isn't a hash input. Favorite must survive.
-        store
-            .upsert_subscription(sample_url_sub("s"), vec![sample_hy2("a", "HK-01-Renamed")])
-            .unwrap();
+        store.upsert_subscription(sample_url_sub("s"),vec![sample_hy2("a","HK-Renamed")]).unwrap();
         assert!(store.favorite_nodes.contains("a"));
-
-        // Node's backend identity actually changed (simulated by a new id, as
-        // would happen if ip/port/credentials rotated) — the old favorite id
-        // no longer matches any node and must be purged, not kept forever.
-        store
-            .upsert_subscription(
-                sample_url_sub("s"),
-                vec![sample_hy2("a-new-ip", "HK-01-Renamed")],
-            )
-            .unwrap();
-        assert!(!store.favorite_nodes.contains("a"));
+        let mut replacement=sample_hy2("b","HK-02");replacement.server="changed.example.com".into();
+        store.upsert_subscription(sample_url_sub("s"),vec![replacement.clone()]).unwrap();
+        assert!(store.favorite_nodes.contains("a"));assert!(!store.favorite_nodes.contains("b"));
+        assert!(store.settings.retained_node_ids.contains("a"));assert!(store.find_node("a").is_some());
+        assert!(!store.toggle_favorite_node("a").unwrap());
+        store.upsert_subscription(sample_url_sub("s"),vec![replacement]).unwrap();
+        assert!(store.find_node("a").is_none());
     }
 
     #[test]

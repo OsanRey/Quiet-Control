@@ -31,10 +31,10 @@ import {
   setCoreDownloadError,
   useCoreDownloadState,
 } from "../coreDownload";
-import { useI18n, type Locale, type MessageKey } from "../i18n";
-import { ACCENTS, applyGlowToDom, isCustomHexAccent, resolveAccent } from "../theme/accents";
-import { AccentColorPickerModal } from "../components/AccentColorPickerModal";
-import { useTheme } from "../theme";
+import { useI18n, type Locale } from "../i18n";
+
+
+import { useQuietTheme, type ThemePreference } from "../quiet-control/Theme";
 import type {
   AppSettings,
   CoreDownloadProgress,
@@ -42,8 +42,8 @@ import type {
   CoreKind,
   DiagnosticIssue,
   ExtraInbound,
-  HeroStyle,
-  ThemeId,
+
+
 } from "../types";
 import { RulesPage } from "./RulesPage";
 import { ChainPage } from "./ChainPage";
@@ -90,29 +90,12 @@ const coreLatestSnapshots = new Map<CoreKind, CoreLatestSnapshot>();
 // Accent preset names are picked from the i18n catalog rather than
 // AccentPreset.name (theme/accents.ts), which is display data only and not
 // locale-aware.
-const ACCENT_LABEL_KEY: Record<string, MessageKey> = {
-  green: "accent.green",
-  blue: "accent.blue",
-  purple: "accent.purple",
-  pink: "accent.pink",
-  orange: "accent.orange",
-  cyan: "accent.cyan",
-};
-
-/** Idle custom swatch: a rainbow ring hinting "pick any colour". Replaced by
- *  the stored custom hex (inline style) once a custom accent is active. */
-const CUSTOM_DOT_RAINBOW =
-  "conic-gradient(from 90deg, #f66, #fc6, #6c6, #6cd, #66c, #c6c, #f66)";
-
-export function SettingsPage() {
+export function SettingsPage({ initialTab = "app" }: { initialTab?: SettingsTab } = {}) {
   const { t, locale, setLocale } = useI18n();
-  const { theme, setTheme, accent, setAccent, glow, setGlow, heroStyle, setHeroStyle, glassFrost, setGlassFrost } =
-    useTheme();
-  const [tab, setTab] = useState<SettingsTab>("app");
+  const quietTheme = useQuietTheme();
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   /** Custom accent color picker (the extra swatch after the presets). */
-  const [accentPickerOpen, setAccentPickerOpen] = useState(false);
-  const [glowPickerOpen, setGlowPickerOpen] = useState(false);
   const [mixed, setMixed] = useState("2080");
   /** Main mixed inbound listens on 0.0.0.0 (LAN) instead of 127.0.0.1. */
   const [allowLan, setAllowLan] = useState(false);
@@ -999,18 +982,6 @@ export function SettingsPage() {
     }
   }
 
-  async function onChangeTheme(next: ThemeId) {
-    if (next === theme) return;
-    setError(null);
-    try {
-      await setTheme(next);
-      const s = await getSettings();
-      setSettings(s);
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-    }
-  }
-
   const customRuntime = (settings?.runtime_source ?? "").startsWith("singbox:");
   /** Xray has no Clash API / clash_api_secret concept — hide that control. */
   const xrayCore = (settings?.core_type ?? "singbox") === "xray";
@@ -1062,7 +1033,7 @@ export function SettingsPage() {
     <div className="page settings-page settings-wide">
       <header className="page-header">
         <div>
-          <h1>{t("settings.title")}</h1>
+          <h1>{t(initialTab==="rules"?"rules.title":initialTab==="dns"?"dns.title":"settings.title")}</h1>
           <p className="page-desc">{activeTab.hint}</p>
         </div>
       </header>
@@ -1072,7 +1043,7 @@ export function SettingsPage() {
 
       <GlassSeg
         value={visibleTab}
-        ariaLabel="Settings sections"
+        ariaLabel={t("stage3.settingsSections")}
         onChange={(v) => {
           if (customRuntime && CUSTOM_BLOCKED_TABS.has(v)) return;
           setTab(v as SettingsTab);
@@ -1272,10 +1243,11 @@ export function SettingsPage() {
         )}
         {!customRuntime && visibleTab === "hosts" && <HostsPage embedded />}
       {visibleTab === "app" && settings && (
-        <section className="settings-panel" aria-label="Application">
+        <section className="settings-panel" aria-label={t("settings.tabApp")}>
           <div className="card settings-app-card">
             <div className="settings-app-cols">
               <div className="settings-app-col">
+              <h2 className="qc-group-title">{t("stage3.general")}</h2>
               <div className="settings-app-row settings-app-pref">
                 <div className="settings-app-text">
                   <div className="settings-app-title">{t("settings.language")}</div>
@@ -1289,11 +1261,12 @@ export function SettingsPage() {
                   disabled={busy}
                   onChange={(v) => void onChangeLocale(v as Locale)}
                   options={[
-                    { value: "zh", label: t("settings.langZh") },
+                    { value: "ru", label: t("stage3.langRu") },
                     { value: "en", label: t("settings.langEn") },
                   ]}
                 />
               </div>
+              <h2 className="qc-group-title">{t("stage3.integration")}</h2>
               <AppToggle
                 title={t("settings.launchAtLogin")}
                 desc={t("settings.launchAtLoginDesc")}
@@ -1329,6 +1302,7 @@ export function SettingsPage() {
                 disabled={busy}
                 onChange={(v) => void patchApp({ unloadUiOnTray: v })}
               />
+              <h2 className="qc-group-title">{t("stage3.advanced")}</h2>
               <AppToggle
                 title={t("settings.closeOnSwitch")}
                 desc={t("settings.closeOnSwitchDesc")}
@@ -1345,187 +1319,9 @@ export function SettingsPage() {
               />
               </div>
               <div className="settings-app-col">
-              <div className="settings-app-row settings-app-pref">
-                <div className="settings-app-text">
-                  <div className="settings-app-title">{t("settings.theme")}</div>
-                  <div className="settings-app-desc muted">
-                    {t("settings.themeDesc")}
-                  </div>
-                </div>
-                <GlassSeg
-                  value={theme}
-                  ariaLabel={t("settings.theme")}
-                  disabled={busy}
-                  onChange={(v) => void onChangeTheme(v as ThemeId)}
-                  options={[
-                    { value: "aerospace", label: t("settings.themeAerospace") },
-                    { value: "day", label: t("settings.themeDay") },
-                  ]}
-                />
-              </div>
-              <div className="settings-app-row settings-app-pref settings-hero-row settings-duo-col">
-                <div className="settings-app-text">
-                  <div className="settings-app-title">{t("settings.glassFrost")}</div>
-                  <div className="settings-app-desc muted">
-                    {t("settings.glassFrostDesc")}
-                  </div>
-                </div>
-                <GlassSeg
-                  value={glassFrost ? "frost" : "lite"}
-                  ariaLabel={t("settings.glassFrost")}
-                  disabled={busy}
-                  onChange={(v) => void setGlassFrost(v === "frost")}
-                  options={[
-                    { value: "lite", label: t("settings.glassFrostLite") },
-                    { value: "frost", label: t("settings.glassFrostFull") },
-                  ]}
-                />
-              </div>
-              <div className="settings-app-row settings-app-pref settings-accent-row">
-                <div className="settings-app-text">
-                  <div className="settings-app-title">{t("settings.accent")}</div>
-                  <div className="settings-app-desc muted">
-                    {t("settings.accentDesc")}
-                  </div>
-                </div>
-                <div
-                  className="settings-accent-swatches"
-                  role="group"
-                  aria-label={t("settings.accent")}
-                >
-                  {ACCENTS.map((a) => (
-                    <button
-                      key={a.id}
-                      type="button"
-                      className={`settings-accent-dot ${accent === a.id ? "active" : ""}`}
-                      style={{ background: a[theme], color: a[theme] }}
-                      title={t(ACCENT_LABEL_KEY[a.id] ?? "settings.accent")}
-                      aria-label={t(ACCENT_LABEL_KEY[a.id] ?? "settings.accent")}
-                      aria-pressed={accent === a.id}
-                      disabled={busy}
-                      onClick={() => void setAccent(a.id)}
-                    >
-                      {accent === a.id ? (
-                        <span className="settings-accent-check">✓</span>
-                      ) : (
-                        ""
-                      )}
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    className={`settings-accent-dot ${isCustomHexAccent(accent) ? "active" : ""}`}
-                    style={
-                      isCustomHexAccent(accent)
-                        ? { background: accent, color: accent }
-                        : { background: CUSTOM_DOT_RAINBOW }
-                    }
-                    title={t("accent.custom")}
-                    aria-label={t("accent.custom")}
-                    aria-pressed={isCustomHexAccent(accent)}
-                    disabled={busy}
-                    onClick={() => setAccentPickerOpen(true)}
-                  >
-                    {isCustomHexAccent(accent) ? (
-                      <span className="settings-accent-check">✓</span>
-                    ) : (
-                      ""
-                    )}
-                  </button>
-                </div>
-              </div>
-              <div className="settings-app-row settings-app-pref settings-accent-row">
-                <div className="settings-app-text">
-                  <div className="settings-app-title">{t("settings.glow")}</div>
-                  <div className="settings-app-desc muted">
-                    {t("settings.glowDesc")}
-                  </div>
-                </div>
-                <div
-                  className="settings-accent-swatches"
-                  role="group"
-                  aria-label={t("settings.glow")}
-                >
-                  {/* "Follow accent" mirrors the accent's effective shade. */}
-                  <button
-                    type="button"
-                    className={`settings-accent-dot ${glow === "accent" ? "active" : ""}`}
-                    style={{
-                      background: resolveAccent(accent)[theme],
-                      color: resolveAccent(accent)[theme],
-                    }}
-                    title={t("settings.glowFollow")}
-                    aria-label={t("settings.glowFollow")}
-                    aria-pressed={glow === "accent"}
-                    disabled={busy}
-                    onClick={() => void setGlow("accent")}
-                  >
-                    {glow === "accent" ? (
-                      <span className="settings-accent-check">✓</span>
-                    ) : (
-                      ""
-                    )}
-                  </button>
-                  {ACCENTS.map((a) => (
-                    <button
-                      key={a.id}
-                      type="button"
-                      className={`settings-accent-dot ${glow === a.id ? "active" : ""}`}
-                      style={{ background: a[theme], color: a[theme] }}
-                      title={t(ACCENT_LABEL_KEY[a.id] ?? "settings.glow")}
-                      aria-label={t(ACCENT_LABEL_KEY[a.id] ?? "settings.glow")}
-                      aria-pressed={glow === a.id}
-                      disabled={busy}
-                      onClick={() => void setGlow(a.id)}
-                    >
-                      {glow === a.id ? (
-                        <span className="settings-accent-check">✓</span>
-                      ) : (
-                        ""
-                      )}
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    className={`settings-accent-dot ${isCustomHexAccent(glow) ? "active" : ""}`}
-                    style={
-                      isCustomHexAccent(glow)
-                        ? { background: glow, color: glow }
-                        : { background: CUSTOM_DOT_RAINBOW }
-                    }
-                    title={t("accent.custom")}
-                    aria-label={t("accent.custom")}
-                    aria-pressed={isCustomHexAccent(glow)}
-                    disabled={busy}
-                    onClick={() => setGlowPickerOpen(true)}
-                  >
-                    {isCustomHexAccent(glow) ? (
-                      <span className="settings-accent-check">✓</span>
-                    ) : (
-                      ""
-                    )}
-                  </button>
-                </div>
-              </div>
-              <div className="settings-app-row settings-app-pref settings-hero-row">
-                <div className="settings-app-text">
-                  <div className="settings-app-title">{t("settings.heroStyle")}</div>
-                  <div className="settings-app-desc muted">
-                    {t("settings.heroStyleDesc")}
-                  </div>
-                </div>
-                <GlassSeg
-                  value={heroStyle}
-                  ariaLabel={t("settings.heroStyle")}
-                  disabled={busy}
-                  onChange={(v) => void setHeroStyle(v as HeroStyle)}
-                  options={[
-                    { value: "particle", label: t("settings.heroStyleParticle") },
-                    { value: "classic", label: t("settings.heroStyleClassic") },
-                    { value: "smiley", label: t("settings.heroStyleSmiley") },
-                  ]}
-                />
-              </div>
+              <h2 className="qc-group-title">{t("stage3.appearance")}</h2>
+              <div className="settings-app-row settings-app-pref"><div className="settings-app-text"><div className="settings-app-title">{t("settings.theme")}</div><p className="settings-app-desc">{t("stage3.themeHint")}</p></div><GlassSeg value={quietTheme.preference} ariaLabel={t("settings.theme")} onChange={v=>quietTheme.setPreference(v as ThemePreference)} options={[{value:"dark",label:t("settings.themeAerospace")},{value:"light",label:t("settings.themeDay")},{value:"system",label:t("stage3.systemTheme")}]} /></div>
+              {quietTheme.saveError && <p role="alert">{quietTheme.saveError}</p>}
               <div className="settings-app-row settings-app-pref settings-tray-icon-row settings-duo-col">
                 <div className="settings-app-text">
                   <div className="settings-app-title">{t("settings.trayIcon")}</div>
@@ -2027,41 +1823,6 @@ export function SettingsPage() {
         </div>
       )}
 
-      {accentPickerOpen && (
-        <AccentColorPickerModal
-          current={
-            isCustomHexAccent(accent) ? accent : resolveAccent(accent)[theme]
-          }
-          title={t("settings.accentCustomTitle")}
-          applyLabel={t("common.save")}
-          cancelLabel={t("common.cancel")}
-          onApply={(hex) => {
-            setAccentPickerOpen(false);
-            void setAccent(hex);
-          }}
-          onClose={() => setAccentPickerOpen(false)}
-        />
-      )}
-
-      {glowPickerOpen && (
-        <AccentColorPickerModal
-          current={
-            isCustomHexAccent(glow)
-              ? glow
-              : resolveAccent(glow === "accent" ? accent : glow)[theme]
-          }
-          title={t("settings.glowCustomTitle")}
-          applyLabel={t("common.save")}
-          cancelLabel={t("common.cancel")}
-          onPreview={(hex) => applyGlowToDom(hex, accent, theme)}
-          onRestore={() => applyGlowToDom(glow, accent, theme)}
-          onApply={(hex) => {
-            setGlowPickerOpen(false);
-            void setGlow(hex);
-          }}
-          onClose={() => setGlowPickerOpen(false)}
-        />
-      )}
       </div>
     </div>
   );

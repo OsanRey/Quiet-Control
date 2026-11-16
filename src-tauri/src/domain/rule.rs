@@ -65,6 +65,9 @@ impl RuleTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
+    /// Quiet Control metadata and optional engine-independent condition tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<serde_json::Value>,
     pub id: String,
     /// Lower = higher priority (applied first).
     pub ord: i32,
@@ -98,6 +101,7 @@ impl Rule {
         let payload = payload.trim().to_string();
         let id = Self::compute_id(rule_type, &payload, target, None, &[], &[], None);
         Self {
+            routing: None,
             id,
             ord,
             rule_type,

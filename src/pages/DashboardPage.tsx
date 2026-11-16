@@ -86,6 +86,7 @@ function isTunPermissionError(msg: string): boolean {
 }
 
 interface Props {
+  quiet?: boolean;
   onGoProfiles?: () => void;
   onGoNodes?: () => void;
   onGoTraffic?: () => void;
@@ -150,7 +151,7 @@ const COUNTRY_NAME_OVERRIDES_ZH: Record<string, string> = {
  *  Falls back to the raw code on invalid codes / engines without the API. */
 function countryDisplayName(cc: string, locale: string): string {
   const code = cc.toUpperCase();
-  if (locale !== "en" && COUNTRY_NAME_OVERRIDES_ZH[code]) {
+  if (locale === "zh" && COUNTRY_NAME_OVERRIDES_ZH[code]) {
     return COUNTRY_NAME_OVERRIDES_ZH[code];
   }
   try {
@@ -200,6 +201,7 @@ function useSingleLineFit<T extends HTMLElement>(text: string) {
 }
 
 export function DashboardPage({
+  quiet = false,
   onGoProfiles,
   onGoNodes,
   onGoTraffic,
@@ -853,15 +855,6 @@ function coreDisplayName(kind: string | null | undefined): string {
     stateLabel === "starting" || stateLabel === "stopping" || busy;
   const isError = stateLabel === "error" || (!!proxy?.error && !running);
 
-  const stateUpper = running
-    ? "RUNNING"
-    : switching
-      ? stateLabel === "stopping"
-        ? "STOPPING"
-        : "STARTING"
-      : isError
-        ? "ERROR"
-        : "STOPPED";
 
   const dotClass = running
     ? "on"
@@ -1054,7 +1047,7 @@ function coreDisplayName(kind: string | null | undefined): string {
   const coreErrorText = proxy?.error && !running ? proxy.error : null;
 
   return (
-    <div className="page dashboard-page">
+    <div className={`page dashboard-page${quiet ? " qc-advanced" : ""}`}>
       {toast && <div className="toast">{toast}</div>}
       {error && (
         <ErrorModal
@@ -1077,16 +1070,16 @@ function coreDisplayName(kind: string | null | undefined): string {
 
       {/* —— Hero: orbit + status + embedded controls (no floating QC card) —— */}
       <section className={`dash-hero is-${orbitState}`}>
-        <HeroVisual
+        {!quiet && <HeroVisual
           state={orbitState}
           spinning={running || switching}
           switching={switching}
-        />
+        />}
 
         <div className="dash-hero-copy">
           <div className="dash-kicker mono">
             <span className={`status-dot ${dotClass}`} />
-            {stateUpper}
+            {t(running?"dashboard.coreRunning":switching?(stateLabel==="stopping"?"dashboard.coreStopping":"dashboard.coreStarting"):isError?"dashboard.coreError":"dashboard.coreStopped")}
             <span className="dash-kicker-sep">·</span>
             SATELITE {appVersion ?? "—"}
           </div>
@@ -1479,7 +1472,7 @@ function coreDisplayName(kind: string | null | undefined): string {
       )}
 
       {/* —— 6 cards: core / spark / traffic+conns · quality / sub / system —— */}
-      <section className="instrument-grid instrument-grid-6" aria-label="Telemetry">
+      <section className="instrument-grid instrument-grid-6" aria-label={t("dashboard.cardTrafficStats")}>
         <article className="instrument accent-green">
           <header className="instrument-head">
             {/* Label carries the active core's name (core_type falls back to

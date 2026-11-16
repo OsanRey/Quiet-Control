@@ -1,0 +1,23 @@
+LOCAL RESEARCH BUILD - NOT PUBLISHED
+
+Satelite upstream 1b33c42: Apache-2.0. Modified runtime/security/UI probe source is
+available in the accompanying local Git research branch. Preserve original notices.
+
+sing-box 1.13.18: GPL-3.0-or-later, https://github.com/SagerNet/sing-box/tree/v1.13.18
+Xray-core 26.3.27: MPL-2.0, https://github.com/XTLS/Xray-core/tree/v26.3.27
+Mihomo 1.19.30: GPLv3, https://github.com/MetaCubeX/mihomo/tree/v1.19.30
+Wintun 0.14.1 official prebuilt DLL: separate Prebuilt Binaries License included.
+The unmodified DLL is used through the Wintun API; its source license is not a
+substitute for the included prebuilt binary license.
+
+Microsoft Visual C++ 14.44.35112 app-local redistributable CRT DLLs and Microsoft
+WebView2 157.0.4341.46 remain under Microsoft's terms. Runtime files were copied
+from a locally installed Microsoft-signed runtime for this personal experiment;
+this is not represented as an official Fixed Version CAB distribution.
+https://developer.microsoft.com/microsoft-edge/webview2/
+https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution
+
+React, Vite, TypeScript, Three.js, React Flow and Tauri retain their upstream
+licenses. pnpm/Cargo lockfiles identify exact dependency versions. A complete
+transitive source/notice/redistribution audit remains a gate before any publication.
+No blanket right to relicense all included dependencies under Apache is claimed.

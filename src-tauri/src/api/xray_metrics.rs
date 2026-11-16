@@ -85,6 +85,13 @@ impl XrayMetrics {
         })
     }
 
+    pub fn traffic_sample(&self) -> Option<(TrafficTotals, HashMap<String,(u64,u64)>)> {
+        let tags=self.outbound_totals()?;
+        let mut totals=TrafficTotals::default();let mut counters=HashMap::new();
+        for (tag,c) in tags {totals.upload_total=totals.upload_total.saturating_add(c.up);totals.download_total=totals.download_total.saturating_add(c.down);counters.insert(tag,(c.up,c.down));}
+        Some((totals,counters))
+    }
+
     /// Per-outbound-tag counters, one poll.
     fn outbound_totals(&self) -> Option<HashMap<String, TagCounters>> {
         let resp = shared_agent()

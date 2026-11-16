@@ -187,3 +187,40 @@ pub fn terminate_pid(pid: u32) -> bool {
         ok != 0 || !pid_alive(pid)
     }
 }
+
+/// Bind an elevated core to the GUI lifetime using duplicated process handles.
+/// A PID-only poll could accidentally refer to a later process after PID reuse.
+pub fn watch_gui_lifetime(parent_pid: u32, core: HANDLE) -> AppResult<()> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> HANDLE;
+        fn DuplicateHandle(source_process: HANDLE, source: HANDLE, target_process: HANDLE,
+            target: *mut HANDLE, access: DWORD, inherit: BOOL, options: DWORD) -> BOOL;
+        fn WaitForSingleObject(handle: HANDLE, milliseconds: DWORD) -> DWORD;
+    }
+    unsafe {
+        let parent = OpenProcess(SYNCHRONIZE, 0, parent_pid);
+        if parent.is_null() { return Err(AppError::Core("GUI process is not alive".into())); }
+        let mut duplicate = core::ptr::null_mut();
+        let current = GetCurrentProcess();
+        if DuplicateHandle(current, core, current, &mut duplicate, 0, 0, 2) == 0 {
+            CloseHandle(parent);
+            return Err(AppError::Core("Cannot retain core process handle".into()));
+        }
+        let parent_handle = parent as usize;
+        let core_handle = duplicate as usize;
+        let thread = std::thread::Builder::new().name("gui-lifetime".into()).spawn(move || {
+            if WaitForSingleObject(parent_handle as HANDLE, 0xFFFFFFFF) == 0 {
+                TerminateProcess(core_handle as HANDLE, 1);
+            }
+            CloseHandle(parent_handle as HANDLE);
+            CloseHandle(core_handle as HANDLE);
+        });
+        if let Err(error) = thread {
+            CloseHandle(parent);
+            CloseHandle(duplicate);
+            return Err(AppError::Core(format!("GUI lifetime watcher: {error}")));
+        }
+        Ok(())
+    }
+}

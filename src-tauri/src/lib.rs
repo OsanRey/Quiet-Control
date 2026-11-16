@@ -1,3 +1,5 @@
+mod split_traffic;
+mod routing;
 mod api;
 mod app_log;
 mod autostart;
@@ -174,7 +176,7 @@ pub fn run() {
                 .with_store(|s| Ok(s.settings.silent_start))
                 .unwrap_or(false);
             let auto_proxy = app_state
-                .with_store(|s| Ok(s.settings.auto_start_proxy))
+                .with_store(|_| Ok(false))
                 .unwrap_or(false);
             let keep_system_proxy_for_auto_start = auto_proxy
                 && app_state
@@ -186,7 +188,7 @@ pub fn run() {
             let launch = app_state
                 .with_store(|s| Ok(s.settings.launch_at_login))
                 .unwrap_or(false);
-            let _ = autostart::set_launch_at_login(launch);
+            let _ = launch; // OS startup changes require the explicit Settings action.
 
             app.manage(app_state);
             app_log::info("app", "Satelite started");
@@ -313,15 +315,17 @@ pub fn run() {
                 // Dev / Linux / Windows: register schemes for the current executable.
                 #[cfg(any(windows, target_os = "linux"))]
                 {
+                    if std::env::args().any(|arg| arg == "--register-uri-schemes") {
                     if let Err(e) = app.deep_link().register_all() {
                         app_log::error("deep-link", format!("register_all failed: {e}"));
+                    }
                     }
                 }
             }
 
             // Multiple clients share clash:// · sing-box:// — claim default so
             // browser "one-click import" opens Satelite (not Sparkle / Verge / …).
-            url_scheme::claim_subscription_schemes();
+            // Research builds never claim the installed client's subscription schemes.
 
             // Silent start: hide only (do not destroy at launch — that can exit the app).
             // Skip when opened via one-click subscribe so the add form is visible.
@@ -419,6 +423,7 @@ pub fn run() {
             commands::get_subscription_raw_config,
             commands::get_subscription_core_support,
             commands::add_subscription_url,
+            commands::check_subscription,
             commands::add_subscription_file,
             commands::add_subscription_text,
             commands::add_subscription_node,
@@ -441,6 +446,7 @@ pub fn run() {
             commands::check_exit_ip,
             commands::regenerate_api_secret,
             commands::set_current_node,
+            commands::prepare_node_selection,
             commands::rename_node,
             commands::toggle_favorite_node,
             commands::get_node_draft,
@@ -459,6 +465,7 @@ pub fn run() {
             commands::reset_core_to_bundled,
             commands::set_core_type,
             commands::test_nodes_latency,
+            commands::test_subscription_nodes,
             commands::ping_nodes_latency,
             commands::test_custom_nodes_latency,
             commands::get_proxy_status,
@@ -492,6 +499,17 @@ pub fn run() {
             commands::reset_rule_set,
             commands::reset_builtin_rule_set,
             commands::list_rules,
+            commands::routing_prepare_source,
+            commands::routing_export,
+            commands::routing_templates,
+            commands::routing_processes,
+            commands::routing_workspace,
+            commands::routing_save_draft,
+            commands::routing_analyze,
+            commands::routing_predict,
+            commands::routing_validate,
+            commands::routing_apply,
+            commands::routing_discard,
             commands::save_rule,
             commands::remove_rule,
             commands::set_rule_enabled,
@@ -610,4 +628,9 @@ mod tests {
         assert!(bounded.iter().all(|url| url.len() <= MAX_DEEP_LINK_URL_LEN));
         assert_eq!(bounded[2], "clash://install-config?url=2");
     }
+}
+
+#[cfg(windows)]
+pub fn run_proxy_recovery_watchdog(pid: u32) -> i32 {
+    proxy::run_recovery_watchdog(pid)
 }

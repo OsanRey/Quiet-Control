@@ -1,0 +1,2 @@
+@layer quiet-material, upstream;
+@import "../App.css" layer(upstream);

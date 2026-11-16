@@ -5,3 +5,5 @@ export {
   type Locale,
   type MessageKey,
 } from "./messages";
+
+export {q, currentLocale} from "./messages";

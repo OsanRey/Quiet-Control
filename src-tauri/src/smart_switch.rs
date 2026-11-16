@@ -1423,7 +1423,7 @@ fn collect_enabled_smart_pools(state: &AppState) -> Vec<SmartPool> {
                         for r in set
                             .rules
                             .iter()
-                            .filter(|r| r.enabled && matches!(r.target, RuleTarget::Smart))
+                            .filter(|r| r.enabled && matches!(r.target, RuleTarget::Smart) && r.routing.as_ref().and_then(|m|m.get("selection")).and_then(serde_json::Value::as_str)!=Some("kernel"))
                         {
                             out.push(SmartPool {
                                 id: r.id.clone(),
@@ -1839,7 +1839,7 @@ mod scan_decision_tests {
 
 /// Immediate probe for one smart rule (e.g. after save). Best-effort.
 pub async fn refresh_smart_rule_now(state: &AppState, rule: &Rule) -> Result<(), String> {
-    if !matches!(rule.target, RuleTarget::Smart) || !rule.enabled {
+    if !matches!(rule.target, RuleTarget::Smart) || !rule.enabled || rule.routing.as_ref().and_then(|m|m.get("selection")).and_then(serde_json::Value::as_str)==Some("kernel") {
         return Ok(());
     }
     let pool = SmartPool {

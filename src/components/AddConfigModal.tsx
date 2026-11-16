@@ -1,5 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { SubscriptionCompatibility, defaultSubscriptionHttp } from "./SubscriptionCompatibility";
+import type { SubscriptionHttp } from "../types";
 import { readImportFile } from "../api";
 import { GlassButton } from "./GlassButton";
 import { ErrorModal } from "./ErrorModal";
@@ -32,6 +34,7 @@ export interface ConfigFormValues {
   autoUpdate?: boolean;
   autoUpdateIntervalMin?: number;
   userAgent?: string;
+  http?: SubscriptionHttp;
 }
 
 type AutoUpdateInterval = "disabled" | "1h" | "12h" | "24h" | "custom";
@@ -148,6 +151,8 @@ export function AddConfigModal({
     useState<AutoUpdateInterval>("24h");
   const [customMinutes, setCustomMinutes] = useState("");
   const [userAgent, setUserAgent] = useState("");
+  const [http, setHttp] = useState<SubscriptionHttp>(defaultSubscriptionHttp);
+  const [checking, setChecking] = useState(false);
   const [fileLabel, setFileLabel] = useState("");
   const [fileError, setFileError] = useState<string | null>(null);
 
@@ -167,6 +172,7 @@ export function AddConfigModal({
       setFileLabel("");
       setFileError(null);
       setUserAgent(initial.userAgent ?? "");
+      setHttp({ ...(initial.http ?? defaultSubscriptionHttp()), client: initial.userAgent && (!initial.http || initial.http.client === "auto") ? "custom" : (initial.http?.client ?? "auto") });
       const interval = initial.autoUpdateIntervalMin ?? 1440;
       setCustomMinutes(
         initial.autoUpdate === false ? "" : String(interval),
@@ -196,6 +202,7 @@ export function AddConfigModal({
       setFileLabel("");
       setFileError(null);
       setUserAgent("");
+      setHttp(defaultSubscriptionHttp());
     }
   }, [isOpen, initial]);
 
@@ -207,10 +214,10 @@ export function AddConfigModal({
       multiple: false,
       filters: [
         {
-          name: "Config",
+          name: t("modal.content"),
           extensions: ["json", "yaml", "yml", "txt", "conf"],
         },
-        { name: "All", extensions: ["*"] },
+        { name: t("traffic.scopeAll"), extensions: ["*"] },
       ],
     });
     if (typeof selected !== "string") return;
@@ -233,6 +240,7 @@ export function AddConfigModal({
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (busy || checking) return;
     const autoUpdate = autoUpdateInterval !== "disabled";
     const interval = autoUpdate
       ? autoUpdateInterval === "custom"
@@ -247,8 +255,8 @@ export function AddConfigModal({
       autoUpdate: kind === "url" ? autoUpdate : false,
       autoUpdateIntervalMin: interval,
     };
-    if (kind === "url") payload.url = url.trim();
-    if (kind === "url" && userAgent.trim()) payload.userAgent = userAgent.trim();
+    if (kind === "url") { payload.url = url.trim(); payload.http = http; }
+    if (kind === "url") payload.userAgent = http.client === "custom" ? userAgent.trim() : "";
     if (kind === "text" || kind === "custom") payload.content = content.trim();
     if (kind === "node") {
       payload.node = {
@@ -265,7 +273,8 @@ export function AddConfigModal({
     autoUpdateInterval === "custom" &&
     parseCustomMinutes(customMinutes) == null;
   const canSubmit =
-    !busy &&
+    !busy && !checking &&
+    (http.client !== "custom" || !!userAgent.trim() || kind !== "url") &&
     !customIntervalInvalid &&
     ((kind === "url" && url.trim().length > 0) ||
       ((kind === "text" || kind === "custom") && content.trim().length > 0) ||
@@ -382,6 +391,7 @@ export function AddConfigModal({
                   autoCapitalize="off"
                   autoCorrect="off"
                   spellCheck={false}
+                  type="url"
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                   placeholder="https://…"
@@ -394,20 +404,7 @@ export function AddConfigModal({
                   </span>
                 )}
               </label>
-              <div className="via-proxy-row">
-                <div>
-                  <div className="sys-proxy-title">{t("modal.viaProxy")}</div>
-                  <div className="sys-proxy-desc">
-                    {t("modal.viaProxyDesc")}
-                  </div>
-                </div>
-                <GlassSwitchControl
-                  checked={viaProxy}
-                  title={t("modal.viaProxy")}
-                  disabled={busy}
-                  onChange={setViaProxy}
-                />
-              </div>
+              <SubscriptionCompatibility value={http} onChange={setHttp} url={url} viaProxy={viaProxy} userAgent={userAgent} setUserAgent={setUserAgent} busy={busy} onChecking={setChecking} />
               <div className="field">
                 <span>{t("modal.autoUpdate")}</span>
                 <GlassSeg
@@ -449,18 +446,22 @@ export function AddConfigModal({
                   )}
                 </label>
               )}
-              <label className="field">
-                <span>{t("modal.userAgent")}</span>
-                <input
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  value={userAgent}
-                  onChange={(e) => setUserAgent(e.target.value)}
-                  placeholder="satelite-proxy/0.1 clash-verge/v2.5 flclash/1"
+              <details className="qc-advanced"><summary>{t("modal.viaProxy")}</summary>
+              <div className="via-proxy-row">
+                <div>
+                  <div className="sys-proxy-title">{t("modal.viaProxy")}</div>
+                  <div className="sys-proxy-desc">
+                    {t("modal.viaProxyDesc")}
+                  </div>
+                </div>
+                <GlassSwitchControl
+                  checked={viaProxy}
+                  title={t("modal.viaProxy")}
                   disabled={busy}
+                  onChange={setViaProxy}
                 />
-              </label>
+              </div>
+              </details>
             </>
           )}
 

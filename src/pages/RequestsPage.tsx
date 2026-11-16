@@ -1,3 +1,5 @@
+import {ConnectionRulesProvider} from '../quiet-control/routing/ConnectionRules';
+import {ConnectionRule,ConnectionRouteDetails} from '../quiet-control/ConnectionRule';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearRequestHistory, listRequests } from "../api";
 import { GlassButton } from "../components/GlassButton";
@@ -36,6 +38,7 @@ interface Props {
 
 export function RequestsPage({ embedded = false }: Props) {
   const { t } = useI18n();
+  const [details,setDetails]=useState<ConnectionView|null>(null);
   const [rows, setRows] = useState<ConnectionView[]>([]);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -160,7 +163,8 @@ export function RequestsPage({ embedded = false }: Props) {
   );
 
   const body = (
-    <>
+    <ConnectionRulesProvider>
+      {details&&<ConnectionRouteDetails row={details} onClose={()=>setDetails(null)}/>}
       {error && (
         <ErrorModal message={error} onClose={() => setError(null)} />
       )}
@@ -228,8 +232,8 @@ export function RequestsPage({ embedded = false }: Props) {
                     </div>
                   </td>
                   <td>
-                    <div className="conn-cell conn-rule" title={r.rule}>
-                      {r.rule || "—"}
+                    <div className="conn-cell conn-rule">
+                      <ConnectionRule row={r} onInspect={setDetails}/>
                     </div>
                   </td>
                   <td>
@@ -254,7 +258,7 @@ export function RequestsPage({ embedded = false }: Props) {
           </table>
         </div>
       )}
-    </>
+    </ConnectionRulesProvider>
   );
 
   if (embedded) {

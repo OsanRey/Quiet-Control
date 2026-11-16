@@ -40,12 +40,13 @@ interface UiModeContextValue {
 
 const UiModeContext = createContext<UiModeContextValue | null>(null);
 
-export function UiModeProvider({ children }: { children: ReactNode }) {
+export function UiModeProvider({ children, externalLayout = false }: { children: ReactNode; externalLayout?: boolean }) {
   const [mode, setModeState] = useState<UiMode>(() => readStored());
   const layoutReady = true;
 
   // Background sync only — never block first paint (low-memory wake path).
   useEffect(() => {
+    if (externalLayout) return;
     const initial = readStored();
     setModeState(initial);
     try {
@@ -55,10 +56,10 @@ export function UiModeProvider({ children }: { children: ReactNode }) {
     }
     void persistUiModePref(initial);
     void applyWindowSizeForUiMode(initial);
-  }, []);
+  }, [externalLayout]);
 
   // Remember the user-resized window size per mode while it is active.
-  useEffect(() => watchWindowSize(mode), [mode]);
+  useEffect(() => externalLayout ? undefined : watchWindowSize(mode), [mode, externalLayout]);
 
   const setMode = useCallback((next: UiMode) => {
     try {
@@ -70,10 +71,10 @@ export function UiModeProvider({ children }: { children: ReactNode }) {
     // Resize first, then swap shell — avoids full-width simple / narrow pro frames.
     void (async () => {
       await persistUiModePref(next);
-      await applyWindowSizeForUiMode(next);
+      if (!externalLayout) await applyWindowSizeForUiMode(next);
       setModeState(next);
     })();
-  }, []);
+  }, [externalLayout]);
 
   const toggleMode = useCallback(() => {
     setMode(mode === "pro" ? "simple" : "pro");

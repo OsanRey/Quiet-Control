@@ -9,7 +9,7 @@ import {
 } from "react";
 import { getSettings, updateSettings } from "../api";
 import {
-  normalizeLocale,
+  normalizeLocale, setActiveLocale,
   translate,
   type Locale,
   type MessageKey,
@@ -27,7 +27,8 @@ interface LocaleContextValue {
 const LocaleContext = createContext<LocaleContextValue | null>(null);
 
 export function LocaleProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>("zh");
+  const [locale, setLocaleState] = useState<Locale>("ru");
+  setActiveLocale(locale);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -48,12 +49,9 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setLocale = useCallback(async (next: Locale) => {
+    await updateSettings({ locale: next });
+    setActiveLocale(next);
     setLocaleState(next);
-    try {
-      await updateSettings({ locale: next });
-    } catch {
-      /* UI already switched; next save may fix */
-    }
   }, []);
 
   const t = useCallback<TFn>(

@@ -967,6 +967,11 @@ pub fn save_rule(
                     "GEOIP 规则已不被 sing-box 1.12+ 支持，请改用 DOMAIN-SUFFIX / IP-CIDR".into(),
                 ));
             }
+            if let Some(id)=input.id.as_ref() {
+                if store.rule_sets.iter().flat_map(|s|s.rules.iter()).any(|r|&r.id==id&&r.routing.as_ref().and_then(|m|m.get("condition")).is_some()) {
+                    return Err(crate::error::AppError::Config("routing.legacy.edit_in_quiet_control".into()));
+                }
+            }
             let payload = input.payload.trim().to_string();
             if payload.is_empty() {
                 return Err(crate::error::AppError::Config("payload empty".into()));

@@ -3,7 +3,7 @@ use crate::domain::{
 };
 use crate::services::import::{
     import_from_custom, import_from_file, import_from_file_with_id, import_from_node,
-    import_from_text, import_from_url_with_id, subscription_id, unique_subscription_id,
+    import_from_text, import_url_with_options, subscription_id, unique_subscription_id,
 };
 use crate::state::AppState;
 use crate::subscription::node_to_draft;
@@ -176,6 +176,17 @@ fn fresh_subscription_id(
         .map_err(|e| e.to_string())
 }
 
+/// Read-only: fetch, parse and validate without saving or touching the runtime.
+#[tauri::command]
+pub async fn check_subscription(
+    state: State<'_, AppState>, url: String, via_proxy: Option<bool>,
+    user_agent: Option<String>, http: Option<crate::domain::SubscriptionHttp>,
+) -> Result<crate::services::subscription_http::CheckReport, String> {
+    let port=state.with_store(|s|Ok(s.settings.mixed_port)).map_err(|_|"subscription.settings_unavailable")?;
+    let (report,_)=crate::services::subscription_http::fetch(&url,via_proxy.unwrap_or(false),Some(port),user_agent.as_deref(),&http.unwrap_or_default()).await;
+    Ok(report)
+}
+
 #[tauri::command]
 pub async fn add_subscription_url(
     app: tauri::AppHandle,
@@ -186,6 +197,7 @@ pub async fn add_subscription_url(
     auto_update: Option<bool>,
     auto_update_interval_min: Option<u32>,
     user_agent: Option<String>,
+    http: Option<crate::domain::SubscriptionHttp>,
 ) -> Result<ImportResult, String> {
     let via = via_proxy.unwrap_or(false);
     let fresh_id = fresh_subscription_id(
@@ -198,7 +210,7 @@ pub async fn add_subscription_url(
         .with_store(|s| Ok(s.settings.mixed_port))
         .map_err(|e| e.to_string())?;
     let mut outcome =
-        import_from_url_with_id(name, url, Some(fresh_id), via, Some(mixed_port), user_agent)
+        import_url_with_options(name, url, Some(fresh_id), via, Some(mixed_port), user_agent, http.unwrap_or_default())
             .await
             .map_err(|e| e.to_string())?;
     apply_auto_update_prefs(
@@ -318,6 +330,7 @@ pub async fn update_subscription(
     auto_update: Option<bool>,
     auto_update_interval_min: Option<u32>,
     user_agent: Option<String>,
+    http: Option<crate::domain::SubscriptionHttp>,
 ) -> Result<ImportResult, String> {
     let existing = state
         .with_store(|store| {
@@ -348,13 +361,14 @@ pub async fn update_subscription(
             // Same-URL subscriptions are allowed: keep this subscription's
             // stable id instead of merging into whichever other subscription
             // happens to hold the same URL.
-            let outcome = import_from_url_with_id(
+            let outcome = import_url_with_options(
                 Some(display_name),
                 url,
                 Some(id.clone()),
                 via,
                 Some(mixed_port),
-                user_agent,
+                user_agent.or_else(|| existing.user_agent.clone()),
+                http.clone().unwrap_or_else(|| existing.http.clone()),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -474,13 +488,14 @@ async fn refresh_subscription_once(
         .map_err(|e| e.to_string())?;
 
     let mut outcome = match &existing.source {
-        crate::domain::SubscriptionSource::Url { url } => import_from_url_with_id(
+        crate::domain::SubscriptionSource::Url { url } => import_url_with_options(
             Some(existing.name.clone()),
             url.clone(),
             Some(id.clone()),
             via,
             Some(mixed_port),
             existing.user_agent.clone(),
+            existing.http.clone(),
         )
         .await
         .map_err(|e| e.to_string())?,
@@ -539,7 +554,7 @@ async fn refresh_subscription_once(
                 .ok_or_else(|| crate::error::AppError::NotFound(id.clone()))
         })
         .map_err(|error| error.to_string())?;
-    if latest.source != existing.source {
+    if latest.source != existing.source || latest.http != existing.http || latest.user_agent != existing.user_agent || latest.via_proxy != existing.via_proxy {
         return Err("订阅地址或文件已在更新期间改变，已丢弃旧结果".into());
     }
     outcome.subscription.name = latest.name;
@@ -634,9 +649,7 @@ pub fn remove_subscription(
     id: String,
 ) -> Result<(), String> {
     let before = enabled_flags(&state);
-    state
-        .with_store_mut(|store| store.remove_subscription(&id))
-        .map_err(|e| e.to_string())?;
+    state.remove_subscription_safely(&id).map_err(|e|e.to_string())?;
     crate::config::remove_custom_config(&state.app_data_dir, &id);
     crate::config::remove_raw_subscription(&state.app_data_dir, &id);
     queue_rebuild_if_enabled_set_changed(&app, &state, &before, "remove");
@@ -711,7 +724,7 @@ pub fn get_subscription_core_support(
 pub fn list_subscription_nodes(
     state: State<'_, AppState>,
     id: String,
-) -> Result<Vec<ProxyNode>, String> {
+) -> Result<Vec<ProfileNodeView>, String> {
     state
         .with_store(|store| {
             Ok(store
@@ -722,11 +735,21 @@ pub fn list_subscription_nodes(
                     // Raw body is generation-only — keep the wire payload lean.
                     let mut node = n.node.clone();
                     node.raw = None;
-                    node
+                    ProfileNodeView{node,latency_method:n.latency_method.clone(),
+                        favorite:store.favorite_nodes.contains(&n.node.id),
+                        retained:store.settings.retained_node_ids.contains(&n.node.id),
+                        last_probe:store.manual_probe_results.get(&n.node.id).cloned()}
                 })
                 .collect())
         })
         .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct ProfileNodeView {
+    #[serde(flatten)] pub node:ProxyNode,
+    pub latency_method:Option<String>,pub favorite:bool,pub retained:bool,
+    pub last_probe:Option<crate::storage::profile_cache::SavedProbe>,
 }
 
 fn persist_import(
@@ -743,6 +766,13 @@ fn persist_import_replacing(
     outcome: crate::services::import::ImportOutcome,
     remove_id: Option<&str>,
 ) -> Result<ImportResult, String> {
+    if outcome.subscription.source.contributes_nodes() && outcome.nodes.is_empty() {
+        return Err("subscription.empty_refresh_kept_cache".into());
+    }
+    if outcome.subscription.format.as_deref()==Some("xray_json") && outcome.skipped.iter().any(|entry|matches!(entry.reason.as_str(),"xray_balancer_requires_custom_config"|"xray_multiple_outbounds_require_custom_config"|"xray_finalmask_requires_custom_config")) {
+        let would_shrink=state.with_store(|store|Ok(store.get_subscription(&outcome.subscription.id).is_some_and(|old|old.node_count>outcome.subscription.node_count))).map_err(|error|error.to_string())?;
+        if would_shrink {return Err("subscription.partial_xray_refresh_kept_cache".into());}
+    }
     if let crate::domain::SubscriptionSource::Custom { content, kind } =
         &outcome.subscription.source
     {
@@ -779,6 +809,25 @@ fn persist_import_replacing(
                 .any(|s| s.id == outcome.subscription.id);
             if is_new {
                 store.prepare_new_subscription_enabled(&mut outcome.subscription);
+            }
+            if !is_new && matches!(outcome.subscription.source, SubscriptionSource::Url { .. }) {
+                // One durable pre-update store snapshot, unaffected by later settings/
+                // probe saves. Private data stays in this application's data directory.
+                // Failure to create rollback aborts before upsert or runtime mutation.
+                let dir = state.app_data_dir.join("subscription-rollback");
+                std::fs::create_dir_all(&dir).map_err(|_| crate::error::AppError::Storage("subscription.rollback_write_failed".into()))?;
+                store.save(&dir.join("store.json"))
+                    .map_err(|_| crate::error::AppError::Storage("subscription.rollback_write_failed".into()))?;
+                let previous_raw = crate::config::raw_subscription_path(&state.app_data_dir, &sub_id);
+                if let Ok(body) = std::fs::read(previous_raw) {
+                    crate::storage::replace_file(&dir.join("raw.txt"), &body)
+                        .map_err(|_| crate::error::AppError::Storage("subscription.rollback_write_failed".into()))?;
+                } else if dir.join("raw.txt").exists() {
+                    std::fs::remove_file(dir.join("raw.txt"))
+                        .map_err(|_| crate::error::AppError::Storage("subscription.rollback_write_failed".into()))?;
+                }
+                crate::storage::replace_file(&dir.join("subscription-id.txt"), sub_id.as_bytes())
+                    .map_err(|_| crate::error::AppError::Storage("subscription.rollback_write_failed".into()))?;
             }
             store.upsert_subscription(outcome.subscription, outcome.nodes)?;
             store.ensure_subscription_enable_policy();

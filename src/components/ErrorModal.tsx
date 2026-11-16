@@ -1,3 +1,5 @@
+import { redactSecrets } from "../quiet-control/privacy";
+import {explainOperationError,subscriptionErrorSummary} from '../quiet-control/operationErrors';
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { GlassButton } from "./GlassButton";
@@ -7,6 +9,7 @@ interface Props {
   onClose: () => void;
   /** Dialog caption; defaults to the generic "Error". */
   title?: string;
+  help?: string;
   /** Optional recovery action (e.g. "retry with admin prompt") shown as an
    *  extra primary button. Does not auto-close the modal — the caller's
    *  onClick decides (usually it re-runs the failed operation, which will
@@ -24,7 +27,7 @@ interface Props {
  * raised while a dialog is open still paint on top. Clicking the veil closes
  * it; clicks inside are stopped so text selection never dismisses by accident.
  */
-export function ErrorModal({ message, onClose, title, action }: Props) {
+export function ErrorModal({ message, onClose, title, help, action }: Props) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const copiedTimer = useRef<number | null>(null);
@@ -38,7 +41,7 @@ export function ErrorModal({ message, onClose, title, action }: Props) {
 
   async function onCopy() {
     try {
-      await navigator.clipboard.writeText(message);
+      await navigator.clipboard.writeText(redactSecrets(message));
       setCopied(true);
       if (copiedTimer.current != null) window.clearTimeout(copiedTimer.current);
       copiedTimer.current = window.setTimeout(() => setCopied(false), 1500);
@@ -67,7 +70,7 @@ export function ErrorModal({ message, onClose, title, action }: Props) {
           </button>
         </header>
         <div className="modal-body">
-          <pre className="error-modal-text">{message}</pre>
+          <p className="field-hint">{help ?? subscriptionErrorSummary(message) ?? t("stage3.errorHelp")}</p><pre className="error-modal-text">{redactSecrets(explainOperationError(message))}</pre>
         </div>
         <footer className="modal-footer">
           <GlassButton onClick={() => void onCopy()}>

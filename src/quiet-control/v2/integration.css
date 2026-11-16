@@ -1,0 +1,118 @@
+/* Integration only: no preview frame or additional simulated window caption. */
+.qc2-root .application .qc2-empty-chart { flex:1;display:grid;place-items:center;color:var(--text-muted);font-size:12px; }
+.qc2-root .application dialog { color:var(--text);background:var(--surface);border:1px solid var(--line);max-width:min(460px,calc(100vw - 30px)); }
+.qc2-root .application dialog h2 { margin-bottom:16px; }
+.qc2-root .application .sidebar { overflow-y:auto;overflow-x:hidden; }
+.qc2-root .application .nav-items .nav-link:nth-child(7) { margin-top:16px; }
+.qc2-root .application .server-names b { min-width:0; }
+
+.qc2-root .application .qc-legacy { overflow-x:auto;max-width:100%; }
+.qc2-root .application .qc-notice { background:var(--surface);color:var(--green); }
+@container(max-height:600px) { .sidebar-version {display:none;} }
+@media(max-height:650px) { .qc2-root .application .nav-link { height:33px;min-height:33px; }.qc2-root .application .sidebar-version {display:none;}.qc2-root .application .topbar {height:52px;} }
+
+@layer qc2-reset {
+ @scope (.qc2-root) to (.qc-legacy) {
+  :where(button,input,select,h1,h2,h3,p,span,strong,b,small,div,section,header,footer,main,aside,nav) {all:revert;box-sizing:border-box;}
+  button,input,select {font:inherit;}
+  button {cursor:pointer;}
+ }
+}
+.qc2-root button:disabled {opacity:.5;cursor:not-allowed;}
+.qc2-root :focus-visible {outline:2px solid #7aa8ff;outline-offset:2px;}
+.qc2-root {line-height:normal;font-weight:400;}
+
+.capture-control {margin-top:17px;padding-top:13px;border-top:1px solid var(--line-soft);}
+.capture-label {font-size:11px;color:var(--text-muted);}
+.capture-modes {display:flex;gap:5px;margin-top:7px;}
+.capture-modes button {flex:1;min-width:0;padding:8px 5px;border:1px solid var(--line);background:var(--surface-soft);color:var(--text-soft);border-radius:8px;font-size:11px;cursor:pointer;}
+.capture-modes button[aria-pressed="true"] {border-color:var(--accent);background:var(--blue-bg);color:var(--accent);}
+.capture-modes button:hover:not(:disabled) {background:var(--surface-hover);}
+.capture-description {font-size:11px;line-height:1.5;color:var(--text-muted);margin-top:8px!important;}
+.capture-diagnostic {font-size:12px;color:var(--orange);margin-top:9px;overflow-wrap:anywhere;}
+.capture-diagnostic p {line-height:1.5;}.capture-diagnostic>div {display:flex;gap:10px;align-items:center;margin-top:8px;}
+@container(max-width:490px) {.capture-modes button {font-size:10px;padding:7px 3px;}.capture-control {margin-top:10px;padding-top:9px;}.capture-description {font-size:10px;}}
+
+/* Stage 4.2: compact home and simultaneous VPN/Direct measurements. */
+.qc2-root .application .page-head{min-height:58px;margin-bottom:15px}.qc2-root .application .connection-panel{min-height:0;padding:18px}.qc2-root .application .traffic-panel{min-height:0;padding:17px}.qc2-root .application .dashboard-top{gap:14px;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}.qc2-root .application .dashboard-bottom{gap:14px;margin-top:14px}.qc2-root .application .favorites-panel,.qc2-root .application .system-panel{min-height:0;padding:16px}.qc2-root .application .favorites-list{max-height:160px;overflow:auto}.qc2-root .application .empty-list{min-height:90px}.qc2-root .application .summary-panel{min-height:62px;margin-top:14px;padding:11px 14px}.qc2-root .application .statusbar{margin-top:12px}.qc2-root .application .traffic-chart{min-height:90px;flex:0 0 auto}.qc2-root .application .chart-body{height:100px}.qc2-root .application .chart-labels{margin-top:7px;margin-bottom:7px}.split-traffic{margin-top:6px;border-top:1px solid var(--line-soft);padding-top:9px}.split-traffic-head,.split-traffic-row{display:grid;grid-template-columns:minmax(75px,.85fr) minmax(0,1fr) minmax(0,1fr);gap:8px;align-items:center}.split-traffic-head{font-size:11px;color:var(--text-muted);margin-bottom:6px}.split-traffic-row{padding:7px 0}.split-traffic-row+.split-traffic-row{border-top:1px solid var(--line-soft)}.split-traffic-name{font-size:12px;overflow-wrap:anywhere}.split-traffic-measure{display:grid;gap:4px;min-width:0}.split-traffic-measure>strong{font-size:20px;line-height:1.2;white-space:nowrap}.split-traffic-measure>strong small{font-size:11px;font-weight:500;color:var(--text-muted)}.split-traffic-measure>small{font-size:11px;color:var(--text-muted)}.split-traffic-note{display:block;font-size:10px;line-height:1.5;margin-top:5px;color:var(--text-muted)}
+@container(max-width:900px){.qc2-root .application .dashboard-top{grid-template-columns:1fr}.qc2-root .application .traffic-chart{flex:1}.qc2-root .application .chart-body{height:110px}.qc2-root .application .traffic-panel{min-height:0}.qc2-root .application .connection-panel{min-height:0}}
+@container(max-width:600px){.qc2-root .application .dashboard-bottom{grid-template-columns:1fr}.split-traffic-measure>strong{font-size:18px}.split-traffic-head,.split-traffic-row{grid-template-columns:85px minmax(0,1fr) minmax(0,1fr)}}
+
+/* Native 1200x900 acceptance: reclaim spacing, keep fonts and power control. */
+@media(min-width:901px){
+ .qc2-root .application .app-content{padding-top:22px;padding-bottom:14px}
+ .qc2-root .application .home-head{min-height:58px;margin-bottom:12px}
+ .qc2-root .application .home-head .eyebrow{display:none}
+ .qc2-root .application .home-head h1{margin:0}
+ .qc2-root .application .home-head p{margin:4px 0 0}
+ .qc2-root .application .connection-panel{padding:16px}
+ .qc2-root .application .connection-main{margin-top:12px}
+ .qc2-root .application .selected-server{min-height:76px;padding:12px}
+ .qc2-root .application .capture-control{margin-top:12px;padding-top:10px}
+ .qc2-root .application .connection-bottom{margin-top:12px;padding-top:12px}
+ .qc2-root .application .option-chip{padding:6px 5px}
+ .qc2-root .application .traffic-panel{padding:15px}
+ .qc2-root .application .traffic-panel .section-title{margin-bottom:10px}
+ .qc2-root .application .traffic-chart{min-height:80px}
+ .qc2-root .application .chart-body{height:80px}
+ .qc2-root .application .chart-labels{margin-top:4px;margin-bottom:4px}
+ .qc2-root .application .split-traffic{padding-top:6px}
+ .qc2-root .application .split-traffic-row{padding-top:5px;padding-bottom:5px}
+ .qc2-root .application .split-traffic-note{margin-top:3px}
+ .qc2-root .application .favorites-panel,.qc2-root .application .system-panel{padding:12px}
+ .qc2-root .application .status-cell{min-height:60px;padding:9px}
+ .qc2-root .application .status-grid{gap:8px}
+ .qc2-root .application .summary-panel{margin-top:12px}
+ .qc2-root .application .statusbar{margin-top:8px}
+}
+.qc2-root .profile-browser{width:min(680px,calc(100vw - 32px));max-height:calc(100dvh - 32px);display:flex;flex-direction:column}
+.qc2-root .profile-browser .modal-body{overflow:auto;min-height:0}
+.qc2-root .profile-browser .search{width:100%;box-sizing:border-box;margin-bottom:12px}
+.qc2-root .profile-browser-nodes{display:grid;gap:7px}
+.qc2-root .profile-browser-node{display:flex;flex-direction:column;gap:5px;text-align:left;min-width:0;padding:12px 14px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--text);cursor:pointer}
+.qc2-root .profile-browser-node:hover,.qc2-root .profile-browser-node:focus-visible{border-color:var(--accent)}
+.qc2-root .profile-browser-node strong,.qc2-root .profile-browser-node small{overflow-wrap:anywhere}
+.qc2-root .profile-browser-node small{color:var(--text-muted)}
+.qc2-root .profile-browser-tools,.qc2-root .profile-browser-node-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.qc2-root .profile-browser-node-actions>span{flex:1;min-width:100px;font-variant-numeric:tabular-nums}
+.qc2-root .profile-browser-node{cursor:default}
+.qc2-root .split-traffic-total{background:var(--surface);border-radius:6px}
+.qc2-root .split-traffic-explanation{font-size:11px;color:var(--text-muted);line-height:1.5;margin-top:5px;overflow-wrap:anywhere}
+.qc2-root .split-traffic-explanation summary{cursor:pointer;color:var(--text-soft)}
+.qc2-root .split-traffic-explanation p{margin:7px 0}
+.qc2-root .profile-workspace{display:grid;grid-template-columns:minmax(220px,280px) minmax(0,1fr);gap:18px;align-items:start}
+.qc2-root .profile-workspace-list,.qc2-root .profile-workspace-panel{min-width:0}
+.qc2-root .profile-workspace-list .config-grid,.qc2-root .profile-workspace-list .sub-grid{display:grid;grid-template-columns:minmax(0,1fr)}
+.qc2-root .profile-workspace-list .config-groups{display:grid;gap:12px}
+.qc2-root .profile-workspace-list .sub-card{padding:12px}
+.qc2-root .profile-workspace-list .sub-card.is-browsed{outline:1px solid var(--accent);outline-offset:2px}
+.qc2-root .profile-workspace-panel.profile-browser{width:auto;max-height:none;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px}
+.qc2-root .profile-panel-header,.qc2-root .profile-selection-controls{display:flex;gap:12px;justify-content:space-between;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.qc2-root .profile-panel-header h2{margin:0 0 6px;font-size:18px}
+.qc2-root .profile-panel-header small,.qc2-root .profile-node-measure small{color:var(--text-muted)}
+.qc2-root .profile-selection-controls label{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.qc2-root .profile-workspace-panel .profile-browser-tools{margin:10px 0;flex-wrap:wrap}
+.qc2-root .profile-workspace-panel .profile-browser-tools .search{flex:1;width:auto;min-width:130px;margin:0}
+.qc2-root .profile-workspace-panel .profile-browser-node{display:grid;grid-template-columns:minmax(100px,1fr) minmax(80px,120px) auto;gap:10px;align-items:center;padding:10px 12px}
+.qc2-root .profile-node-name,.qc2-root .profile-node-measure{min-width:0;display:flex;flex-direction:column;gap:4px}
+.qc2-root .profile-node-name strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qc2-root .profile-node-name small{font-size:11px}
+.qc2-root .profile-node-name i{font-size:10px;font-style:normal;color:var(--text-soft);margin-right:7px}
+.qc2-root .profile-browser-node.is-selected{border-color:var(--accent)}
+.qc2-root .profile-browser-node.is-active .profile-node-name strong{color:var(--accent)}
+.qc2-root .profile-node-measure{font-variant-numeric:tabular-nums;font-size:12px}
+.qc2-root .profile-node-measure small{font-size:10px;overflow-wrap:anywhere}
+.qc2-root .profile-warning{color:var(--qc-warning,#e9ac52);font-size:12px;line-height:1.5}
+.qc2-root .profile-node-menu{position:relative}
+.qc2-root .profile-node-menu summary{cursor:pointer;list-style:none;padding:8px}
+.qc2-root .profile-node-menu[open] button{position:absolute;right:0;top:30px;z-index:5;min-width:140px;padding:10px;background:var(--surface);border:1px solid var(--line);border-radius:8px;color:var(--text)}
+@media(max-width:1100px){.qc2-root .profile-workspace{grid-template-columns:minmax(180px,230px) minmax(0,1fr)}.qc2-root .profile-workspace-panel .profile-browser-node{grid-template-columns:minmax(0,1fr) auto}.qc2-root .profile-workspace-panel .profile-browser-node-actions{grid-column:1/-1;justify-content:flex-end}}
+@media(max-width:800px){.qc2-root .profile-workspace{grid-template-columns:minmax(0,1fr)}.qc2-root .profile-workspace-list .config-groups{max-height:260px;overflow:auto}.qc2-root .profile-workspace-panel.profile-browser{padding:12px}}
+.qc2-root .split-traffic-total{padding-top:2px;padding-bottom:2px}
+.qc2-root .split-traffic-total .split-traffic-measure>strong{font-size:18px;line-height:24px}
+.qc2-root .profile-workspace-list{position:sticky;top:12px;max-height:calc(100dvh - 120px);overflow-y:auto;padding:3px}
+.qc2-root .profile-chosen-summary{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;line-height:1.5;color:var(--text-soft)}
+@media(max-width:800px){.qc2-root .profile-workspace-list{position:static;max-height:260px}}
+@media(max-width:800px){.qc2-root .profile-workspace-list .config-groups{max-height:none;overflow:visible}}
+
+.qc2-root .connection-rule-button{display:block;max-width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;font:inherit;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}.qc2-root .connection-rule-button:hover{text-decoration:underline}

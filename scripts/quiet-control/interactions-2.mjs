@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import {spawn} from 'node:child_process';
+import {connect,wait} from './cdp.mjs';
+const app=spawn('C:/Research/satelite-proxy.exe',[],{cwd:'C:/Research',env:{...process.env,SATELITE_TEST_CDP_PORT:'9222'},stdio:'ignore'});app.unref();const c=await connect();await wait(1500);
+await c.invoke('plugin:window|set_size',{label:'main',value:{Logical:{width:1000,height:820}}});await wait(200);
+await c.evaluate("document.querySelector('.theme-cycle').click()");await wait(100);await c.evaluate("document.querySelectorAll('.theme-popover button')[0].click()");await wait(350);
+const before=await c.evaluate("getComputedStyle(document.querySelector('.selected-server')).backgroundImage");const box=await c.evaluate("document.querySelector('.selected-server').getBoundingClientRect().toJSON()");await c.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:box.x+box.width/2,y:box.y+box.height/2});await wait(250);const after=await c.evaluate("getComputedStyle(document.querySelector('.selected-server')).backgroundImage");
+await c.evaluate("document.querySelector('.selected-server').focus()");await c.call('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});await c.call('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+const focus=await c.evaluate("({tag:document.activeElement.tagName,outline:getComputedStyle(document.activeElement).outlineWidth})");fs.writeFileSync('C:/Results/hover-focus.png',Buffer.from((await c.call('Page.captureScreenshot',{format:'png'})).data,'base64'));
+const report={hoverChanged:before!==after,focusVisible:focus.outline==='2px',before,after,focus};fs.writeFileSync('C:/Results/interactions.json',JSON.stringify(report,null,2));c.ws.close();process.exitCode=report.hoverChanged&&report.focusVisible?0:1;

@@ -1,0 +1,18 @@
+import fs from 'node:fs';
+import ts from 'typescript';
+import assert from 'node:assert/strict';
+const source=fs.readFileSync('src/quiet-control/nodeSources.ts','utf8');
+const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText;
+const {matchesNodeSource,probeGroups}=await import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'));
+const profiles=[{id:'a',source_kind:'url',enabled:true},{id:'b',source_kind:'url',enabled:false},{id:'l',source_kind:'text'},{id:'n',source_kind:'node'},{id:'c',source_kind:'custom'}];
+const nodes=profiles.map((p,i)=>({id:'node-'+p.id,subscription_id:p.id,favorite:i===1}));
+const before=JSON.stringify({profiles,nodes});
+assert.equal(nodes.filter(n=>matchesNodeSource(n,'all',profiles)).length,5);
+assert.deepEqual(nodes.filter(n=>matchesNodeSource(n,'b',profiles)).map(n=>n.id),['node-b']);
+assert.deepEqual(nodes.filter(n=>matchesNodeSource(n,'local',profiles)).map(n=>n.id),['node-l','node-n']);
+assert.equal(nodes.filter(n=>matchesNodeSource(n,'missing',profiles)).length,0);
+const ids=nodes.filter(n=>n.favorite).map(n=>n.id);
+assert.deepEqual([...probeGroups(ids,nodes)],[['b',['node-b']]],'only the visible favorite in an inactive source is probed');
+assert.deepEqual([...probeGroups(['node-l','node-a','node-n','unknown'],nodes)],[['l',['node-l']],['a',['node-a']],['n',['node-n']]]);
+assert.equal(JSON.stringify({profiles,nodes}),before,'source filtering and probe grouping never mutate cache or enabled flags');
+console.log('Passed: all/inactive/local/missing sources, favorite-scoped and exact-ID probes, immutable cache.');

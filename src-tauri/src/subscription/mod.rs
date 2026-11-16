@@ -6,6 +6,7 @@ mod manual;
 mod singbox;
 mod uri;
 mod yaml_util;
+mod xray;
 
 pub use clash::parse_clash_yaml;
 pub use manual::{draft_to_node, node_to_draft, parse_manual_draft, parse_single_uri};
@@ -150,6 +151,7 @@ pub fn parse_subscription(content: &str) -> AppResult<ParseResult> {
     if looks_like_json(trimmed) {
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(value) => {
+                if xray::looks_like_xray(&value) {return xray::parse(&value);}
                 if looks_like_singbox_json(&value) {
                     match parse_singbox_json(trimmed) {
                         Ok(r) => return Ok(r),

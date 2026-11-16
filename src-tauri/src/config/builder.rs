@@ -50,6 +50,7 @@ pub struct BuildOptions {
     pub outbound_mode: OutboundMode,
     /// `route.final` in Rule mode: proxy | direct | block.
     pub route_final: String,
+    pub selected_apps_only: bool,
     /// off/smart → selector; kernel → urltest.
     pub auto_select: AutoSelectMode,
     /// URL for kernel urltest (and shared probe default).
@@ -193,6 +194,10 @@ pub struct BuiltConfig {
 
 /// Convert nodes into a complete sing-box config document.
 pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResult<BuiltConfig> {
+    crate::routing::exceptions::validate(&opts.rule_sets,&opts.rules)?;
+    let scoped = crate::routing::policy::options(opts);
+    let opts = scoped.as_ref();
+    crate::routing::validate_options(opts, crate::core::CoreKind::SingBox)?;
     if nodes.is_empty() {
         return Err(AppError::Config(
             "no nodes available; import a subscription first".into(),
@@ -307,7 +312,7 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
         }));
     }
     // Per-rule smart selectors (keyword-filtered node pools).
-    outbounds.extend(build_smart_rule_selectors(&effective_rules, nodes, &tags));
+    outbounds.extend(build_smart_rule_selectors(&effective_rules, nodes, &tags, &opts.probe_url));
     // Whole-set keyword pools for Filter-strategy sets (local + remote).
     outbounds.extend(build_filter_set_selectors(&opts.rule_sets, nodes, &tags));
     // Named node pools (Proxy Chain feature) — selectors must precede the
@@ -1009,7 +1014,8 @@ fn route_local_set_grouped(
                 resolve_rule_outbound(&rule, nodes, tags, chain_entry_tags)
             )
         };
-        if let Some((_, rules)) = groups.iter_mut().find(|(group, _)| group == &key) {
+        // Merge adjacent runs only: combining A/B/A changes first-match priority.
+        if let Some((_, rules)) = groups.last_mut().filter(|(group, _)| group == &key) {
             rules.push(rule);
         } else {
             groups.push((key, vec![rule]));
@@ -1082,8 +1088,13 @@ fn inline_rule_is_effective(rule: &Rule) -> bool {
 /// matchable — sing-box rejects an empty rule body ("missing condition"), so
 /// the caller must drop the definition and everything referencing it.
 fn build_headless_rules(rules: &[Rule]) -> Option<Vec<Value>> {
+    let mut advanced = Vec::new();
     let mut buckets: [Vec<String>; 5] = Default::default();
     for rule in rules.iter().filter(|rule| inline_rule_is_effective(rule)) {
+        if rule.routing.as_ref().and_then(|x|x.get("condition")).is_some_and(|c|!c.is_null()) {
+            advanced.push(crate::routing::conditions::singbox(&crate::routing::conditions::expression(rule)));
+            continue;
+        }
         let payload = rule.payload.trim();
         let index = match rule.rule_type {
             RuleType::Domain => 0,
@@ -1118,11 +1129,12 @@ fn build_headless_rules(rules: &[Rule]) -> Option<Vec<Value>> {
         "ip_cidr",
         "process_name",
     ];
-    let headless: Vec<Value> = keys
+    let mut headless: Vec<Value> = keys
         .iter()
         .zip(buckets)
         .filter_map(|(key, values)| (!values.is_empty()).then(|| json!({ (*key): values })))
         .collect();
+    headless.extend(advanced);
     (!headless.is_empty()).then_some(headless)
 }
 
@@ -1178,6 +1190,9 @@ fn build_route_rules(
                 RuleType::Process => json!({ "process_name": [payload] }),
                 RuleType::Geoip => return None,
             };
+            if r.routing.as_ref().and_then(|x|x.get("condition")).is_some_and(|c|!c.is_null()) {
+                rule=crate::routing::conditions::singbox(&crate::routing::conditions::expression(r));
+            }
             if r.target == RuleTarget::Block {
                 rule.as_object_mut()?
                     .insert("action".into(), json!("reject"));
@@ -1226,6 +1241,9 @@ fn resolve_rule_outbound(
 
 /// Node outbound tags matching a smart rule's include/exclude name filters.
 pub fn smart_pool_tags(r: &Rule, nodes: &[ProxyNode], tags: &[String]) -> Vec<String> {
+    if let Some(ids)=r.routing.as_ref().and_then(|m|m.get("node_ids")).and_then(serde_json::Value::as_array) {
+        return nodes.iter().filter(|n|ids.iter().any(|v|v.as_str()==Some(n.id.as_str()))).map(outbound_tag).filter(|t|tags.contains(t)).collect();
+    }
     filter_pool_tags(&r.smart_include, &r.smart_exclude, nodes, tags)
 }
 
@@ -1507,7 +1525,7 @@ fn build_chain_outbounds(
 }
 
 /// Nodes matching smart filters (for probe / UI).
-fn build_smart_rule_selectors(rules: &[Rule], nodes: &[ProxyNode], tags: &[String]) -> Vec<Value> {
+fn build_smart_rule_selectors(rules: &[Rule], nodes: &[ProxyNode], tags: &[String], probe_url: &str) -> Vec<Value> {
     use crate::domain::RuleTarget;
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1526,6 +1544,10 @@ fn build_smart_rule_selectors(rules: &[Rule], nodes: &[ProxyNode], tags: &[Strin
         }
         let pool = smart_pool_tags(r, nodes, tags);
         if pool.is_empty() {
+            continue;
+        }
+        if r.routing.as_ref().and_then(|m|m.get("selection")).and_then(serde_json::Value::as_str)==Some("kernel") {
+            out.push(json!({"type":"urltest","tag":group,"outbounds":pool,"url":probe_url,"interval":"5m","tolerance":50}));
             continue;
         }
         let default = pool.first().cloned().unwrap_or_else(|| "direct".into());
@@ -2243,6 +2265,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: "https://www.gstatic.com/generate_204".into(),
             find_process: true,
@@ -2371,6 +2394,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3090,6 +3114,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3208,6 +3233,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3256,6 +3282,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: "https://www.gstatic.com/generate_204".into(),
             find_process: true,
@@ -3310,6 +3337,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3378,6 +3406,7 @@ mod tests {
                 dns,
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3423,6 +3452,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Kernel,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3473,6 +3503,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3542,6 +3573,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: "https://www.gstatic.com/generate_204".into(),
             find_process: true,
@@ -3592,6 +3624,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3632,6 +3665,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: "https://www.gstatic.com/generate_204".into(),
             find_process: true,
@@ -3702,6 +3736,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: "https://www.gstatic.com/generate_204".into(),
             find_process: true,
@@ -3819,6 +3854,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3857,6 +3893,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Direct,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3896,6 +3933,7 @@ mod tests {
                     dns: DnsSettings::default(),
                     outbound_mode: OutboundMode::Rule,
                     route_final: rf.into(),
+                    selected_apps_only: false,
                     auto_select: crate::domain::AutoSelectMode::Off,
                     probe_url: "https://www.gstatic.com/generate_204".into(),
                     find_process: true,
@@ -3941,6 +3979,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Global,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -3992,6 +4031,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -4044,6 +4084,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -4100,6 +4141,7 @@ mod tests {
                 dns: DnsSettings::default(),
                 outbound_mode: OutboundMode::Rule,
                 route_final: "proxy".into(),
+                selected_apps_only: false,
                 auto_select: crate::domain::AutoSelectMode::Off,
                 probe_url: "https://www.gstatic.com/generate_204".into(),
                 find_process: true,
@@ -4269,6 +4311,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: "https://www.gstatic.com/generate_204".into(),
             find_process: true,
@@ -4655,6 +4698,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: "https://www.gstatic.com/generate_204".into(),
             find_process: true,
@@ -4991,6 +5035,7 @@ mod tests {
             dns: DnsSettings::default(),
             outbound_mode: OutboundMode::Rule,
             route_final: "proxy".into(),
+            selected_apps_only: false,
             auto_select: crate::domain::AutoSelectMode::Off,
             probe_url: String::new(),
             find_process: true,

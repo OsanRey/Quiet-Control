@@ -21,3 +21,6 @@ pub use logs::*;
 pub use proxy::*;
 pub use rules::*;
 pub use subscription::*;
+
+mod routing;
+pub use routing::*;

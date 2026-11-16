@@ -699,6 +699,7 @@ pub enum SubscriptionFormat {
     UriList,
     Base64UriList,
     SingboxJson,
+    XrayJson,
     Manual,
 }
 

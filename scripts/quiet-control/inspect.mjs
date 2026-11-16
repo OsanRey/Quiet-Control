@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import { connect, wait } from './cdp.mjs';
+const c = await connect();
+await wait(2000);
+await c.invoke('plugin:window|set_size', { label: 'main', value: { Logical: { width: 1360, height: 960 } } });
+await c.evaluate(`(()=>{const s=document.querySelector('.qc-header-actions select');s.value='dark';s.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+await wait(700);
+fs.writeFileSync('C:/Results/initial-dom.json', JSON.stringify(await c.evaluate(`({text:document.body.innerText,theme:document.documentElement.dataset.qcTheme,width:innerWidth,height:innerHeight,main:document.querySelector('.qc-main')?.getBoundingClientRect().toJSON()})`), null, 2));
+fs.writeFileSync('C:/Results/initial.png', Buffer.from((await c.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })).data, 'base64'));
+c.ws.close();

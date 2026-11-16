@@ -14,6 +14,7 @@ use super::{SystemProxy, SystemProxySnapshot};
 use crate::error::{AppError, AppResult};
 use core::ffi::c_void as CVoid;
 use std::ffi::OsStr;
+use std::os::windows::process::CommandExt;
 use std::os::windows::ffi::OsStrExt;
 
 // --- Minimal Win32 FFI -------------------------------------------------------
@@ -62,6 +63,7 @@ extern "system" {
         lpcbData: *mut DWORD,
     ) -> LONG;
     fn RegCloseKey(hKey: HKEY) -> LONG;
+    fn RegDeleteValueW(hKey: HKEY, lpValueName: LPCWSTR) -> LONG;
 }
 
 #[link(name = "wininet")]
@@ -72,6 +74,13 @@ extern "system" {
         lpBuffer: *mut CVoid,
         dwBufferLength: DWORD,
     ) -> BOOL;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut CVoid;
+    fn WaitForSingleObject(handle: *mut CVoid, milliseconds: u32) -> u32;
+    fn CloseHandle(handle: *mut CVoid) -> i32;
 }
 
 /// Encode a Rust string as UTF-16 **with** a trailing NUL, as Win32 expects.
@@ -250,55 +259,149 @@ fn notify_changed() {
 
 pub struct WindowsSystemProxy;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RestoreJournal {
+    pid: u32,
+    owned_server: String,
+    previous_enabled: Option<u32>,
+    previous_server: Option<String>,
+    previous_override: Option<String>,
+}
+
+const OWNED_OVERRIDE: &str = "localhost;127.*;10.*;172.16.*;192.168.*;<local>";
+
+fn journal_path() -> AppResult<std::path::PathBuf> {
+    crate::portable::app_data_dir()
+        .map(|root| root.join("data/system-proxy-restore.json"))
+        .ok_or_else(|| AppError::Core("Research system proxy requires portable.flag".into()))
+}
+
+fn read_journal() -> Option<RestoreJournal> {
+    serde_json::from_slice(&std::fs::read(journal_path().ok()?).ok()?).ok()
+}
+
+fn delete_value(h: HKEY, name: &str) -> AppResult<()> {
+    let rc = unsafe { RegDeleteValueW(h, wide(name).as_ptr()) };
+    if rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND { Ok(()) }
+    else { Err(AppError::Core(format!("delete {name}: {rc}"))) }
+}
+
+fn restore_values(h: HKEY, journal: &RestoreJournal) -> AppResult<()> {
+    for (name, value) in [("ProxyServer", &journal.previous_server), ("ProxyOverride", &journal.previous_override)] {
+        match value { Some(value) => set_sz(h, name, value)?, None => delete_value(h, name)? }
+    }
+    match journal.previous_enabled {
+        Some(value) => set_dword(h, "ProxyEnable", value),
+        None => delete_value(h, "ProxyEnable"),
+    }
+}
+
+fn still_owned(h: HKEY, journal: &RestoreJournal) -> AppResult<bool> {
+    Ok(query_dword(h, "ProxyEnable")? == Some(1)
+        && query_sz(h, "ProxyServer")?.as_deref() == Some(journal.owned_server.as_str())
+        && query_sz(h, "ProxyOverride")?.as_deref() == Some(OWNED_OVERRIDE))
+}
+
 impl SystemProxy for WindowsSystemProxy {
     fn enable(&self, host: &str, port: u16) -> AppResult<SystemProxySnapshot> {
-        // ProxyServer format: "host:port" applies to all protocols.
-        // For per-protocol we'd use "http=host:port;https=host:port;socks=host:port",
-        // but the unified form is what sing-box's mixed port expects.
-        let server = format!("{host}:{port}");
+        let path = journal_path()?;
+        if path.exists() {
+            self.disable(None)?;
+        }
         let h = open_internet_settings()?;
-        set_dword(h, "ProxyEnable", 1)?;
-        set_sz(h, "ProxyServer", &server)?;
-        // Local addresses bypass the proxy. Keep it simple + sane.
-        set_sz(
-            h,
-            "ProxyOverride",
-            "localhost;127.*;10.*;172.16.*;192.168.*;<local>",
-        )?;
+        let operation: AppResult<_> = (|| {
+            let journal = RestoreJournal {
+                pid: std::process::id(),
+                owned_server: format!("{host}:{port}"),
+                previous_enabled: query_dword(h, "ProxyEnable")?,
+                previous_server: query_sz(h, "ProxyServer")?,
+                previous_override: query_sz(h, "ProxyOverride")?,
+            };
+            let raw = serde_json::to_string(&journal).map_err(|e| AppError::Core(e.to_string()))?;
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            let tmp = path.with_extension("tmp");
+            let mut file = std::fs::File::create(&tmp)?;
+            std::io::Write::write_all(&mut file, raw.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(tmp, &path)?;
+            // Start a non-elevated recovery process before changing the registry.
+            // It waits on this process handle, rather than polling a reusable PID.
+            let watchdog = std::process::Command::new(std::env::current_exe()?)
+                .args(["--proxy-recovery-watchdog", &std::process::id().to_string()])
+                .creation_flags(0x08000000)
+                .spawn();
+            if let Err(error) = watchdog {
+                let _ = std::fs::remove_file(&path);
+                return Err(AppError::Core(format!("recovery watchdog: {error}")));
+            }
+            let apply = (|| {
+                set_sz(h, "ProxyServer", &journal.owned_server)?;
+                set_sz(h, "ProxyOverride", OWNED_OVERRIDE)?;
+                set_dword(h, "ProxyEnable", 1)
+            })();
+            if let Err(error) = apply {
+                if restore_values(h, &journal).is_ok() { let _ = std::fs::remove_file(&path); }
+                return Err(error);
+            }
+            Ok(SystemProxySnapshot { detail: raw })
+        })();
         unsafe { RegCloseKey(h) };
-
         notify_changed();
-
-        // detail is opaque to the caller; we record the server we set so
-        // disable() has a hint (though disable mainly just clears ProxyEnable).
-        Ok(SystemProxySnapshot { detail: server })
+        operation
     }
 
-    fn disable(&self, _snapshot: Option<&SystemProxySnapshot>) -> AppResult<()> {
-        // We only flip ProxyEnable off and leave ProxyServer intact, so a later
-        // re-enable (or another proxy app) still has a value to use. This
-        // matches how Windows' own Settings UI toggles the proxy.
+    fn disable(&self, snapshot: Option<&SystemProxySnapshot>) -> AppResult<()> {
+        let journal = snapshot.and_then(|s| serde_json::from_str::<RestoreJournal>(&s.detail).ok())
+            .or_else(read_journal);
+        let Some(journal) = journal else { return Ok(()) };
         let h = open_internet_settings()?;
-        set_dword(h, "ProxyEnable", 0)?;
+        let operation: AppResult<_> = (|| {
+            // Another client or the user may have changed any owned value.
+            // Do not overwrite their newer settings, even during crash recovery.
+            if still_owned(h, &journal)? { restore_values(h, &journal)?; }
+            Ok(())
+        })();
         unsafe { RegCloseKey(h) };
-
+        operation?;
+        if let Ok(path) = journal_path() { let _ = std::fs::remove_file(path); }
         notify_changed();
         Ok(())
     }
 
     fn detect_owned(&self, host: &str, port: u16) -> AppResult<Option<SystemProxySnapshot>> {
+        let Some(journal) = read_journal() else { return Ok(None) };
+        if journal.owned_server != format!("{host}:{port}") { return Ok(None) }
         let h = open_internet_settings()?;
-        let enabled = query_dword(h, "ProxyEnable");
-        let server = query_sz(h, "ProxyServer");
+        let owned = still_owned(h, &journal);
         unsafe { RegCloseKey(h) };
-        let enabled = enabled?.unwrap_or(0) != 0;
-        let server = server?.unwrap_or_default();
-        if enabled && proxy_server_is_exact_endpoint(&server, host, port) {
-            Ok(Some(SystemProxySnapshot { detail: server }))
-        } else {
-            Ok(None)
-        }
+        if owned? {
+            Ok(Some(SystemProxySnapshot { detail: serde_json::to_string(&journal)
+                .map_err(|e| AppError::Core(e.to_string()))? }))
+        } else { Ok(None) }
     }
+}
+
+pub fn run_recovery_watchdog(pid: u32) -> i32 {
+    let handle = unsafe { OpenProcess(0x00100000, 0, pid) };
+    if handle.is_null() { return 2; }
+    let status = unsafe { WaitForSingleObject(handle, 0xFFFFFFFF) };
+    unsafe { CloseHandle(handle) };
+    if status != 0 { return 3; }
+    if read_journal().map(|j| j.pid) == Some(pid) {
+        if WindowsSystemProxy.disable(None).is_err() { return 4; }
+    }
+    0
+}
+
+pub(super) fn recover_stale_journal() -> AppResult<Option<bool>> {
+    let Some(journal) = read_journal() else { return Ok(None) };
+    let h = open_internet_settings()?;
+    let owned = still_owned(h, &journal);
+    unsafe { RegCloseKey(h) };
+    let owned = owned?;
+    WindowsSystemProxy.disable(None)?;
+    Ok(Some(owned))
 }
 
 #[cfg(test)]

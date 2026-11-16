@@ -22,8 +22,27 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+// A supported protocol may still be omitted by a generator (for example a raw
+// Mihomo node with a missing dialer dependency). Never accept its first-node
+// fallback as the user's manual selection.
+fn validate_manual_generated_selection(store: &AppStore, selected_tag: &str) -> AppResult<()> {
+    if store.settings.auto_select == crate::domain::AutoSelectMode::Off {
+        let node = store.settings.current_node_id.as_deref().and_then(|id| store.find_node(id))
+            .ok_or_else(|| AppError::Config("selection.choose_node_before_connect".into()))?;
+        if selected_tag != outbound_tag(node) {
+            return Err(AppError::Config("selection.unsupported_node".into()));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyStatus {
+    pub actual_node_id: Option<String>,
+    pub actual_node_name: Option<String>,
+    pub selected_node_name: Option<String>,
+    pub selected_node_id: Option<String>,
+    pub split_traffic: crate::split_traffic::View,
     pub running: bool,
     pub core_state: CoreState,
     pub system_proxy: bool,
@@ -180,6 +199,9 @@ impl SidecarProc {
 }
 
 pub struct Runtime {
+    pub actual_node_id: Option<String>,
+    split_traffic: crate::split_traffic::Accounting,
+    split_generated: bool,
     pub core: CoreManager,
     /// Companion sidecar processes (sing-box main mode + delegation
     /// settings), one per delegated core kind in plan order.
@@ -325,6 +347,9 @@ impl Runtime {
             last_config_path: None,
             last_binary_path: None,
             system_proxy: create_system_proxy(),
+            split_traffic: Default::default(),
+            split_generated: false,
+            actual_node_id: None,
             traffic_prev: None,
             traffic_speed: (0, 0),
             live_connections: Vec::new(),
@@ -412,14 +437,22 @@ impl Runtime {
         }
         // Core may have exited outside stop_proxy — keep uptime field consistent.
         if !self.core.is_running() {
+            self.actual_node_id = None;
+            self.split_traffic.finish();
             self.core_started_at = None;
         } else if self.core_started_at.is_none() {
             // Recover if we missed setting it (e.g. process still up after soft restart path).
-            self.core_started_at = Some(now_unix_secs());
+            self.split_traffic.reset();
+        self.actual_node_id = if matches!(store.settings.runtime_source(), RuntimeSource::Generated) && !store.settings.auto_select.is_kernel() { store.settings.current_node_id.clone() } else {None};
+        self.core_started_at = Some(now_unix_secs());
         }
         let core_memory_bytes = self.core_memory_bytes();
         let core_elevated = self.core_elevated();
         ProxyStatus {
+            actual_node_id: self.actual_node_id.clone(),
+            actual_node_name:self.actual_node_id.as_deref().and_then(|id|store.find_node(id)).map(|n|n.name.clone()),
+            selected_node_name:store.settings.last_manual_node_id.as_deref().or_else(||if store.settings.auto_select==crate::domain::AutoSelectMode::Off {store.settings.current_node_id.as_deref()}else{None}).and_then(|id|store.find_node(id)).map(|n|n.name.clone()),
+            selected_node_id:store.settings.last_manual_node_id.clone().or_else(||if store.settings.auto_select==crate::domain::AutoSelectMode::Off {store.settings.current_node_id.clone()}else{None}),
             running: self.core.is_running(),
             core_state: self.core.state(),
             system_proxy: self.system_proxy_on,
@@ -440,6 +473,7 @@ impl Runtime {
                 .last_config_path
                 .as_ref()
                 .map(|p| p.display().to_string()),
+            split_traffic: self.split_traffic.view(),
             upload_speed: self.traffic_speed.0,
             download_speed: self.traffic_speed.1,
             upload_total: self
@@ -723,8 +757,17 @@ impl Runtime {
         });
     }
 
+    pub fn apply_outbound_traffic(&mut self, counters:&HashMap<String,(u64,u64)>){
+        if self.split_generated && self.sidecars.is_empty(){self.split_traffic.outbounds(counters);}
+        else{self.split_traffic.unavailable("custom_or_multicore");}
+    }
+
     /// Apply a pre-fetched snapshot (journal / HTTP fallback). Prefer calling I/O outside the lock.
     pub fn apply_snapshot(&mut self, snap: crate::api::ConnectionsSnapshot) {
+        if self.xray_metrics.is_none() {
+            if self.split_generated && self.sidecars.is_empty() {self.split_traffic.connections(&snap);}
+            else {self.split_traffic.unavailable("custom_or_multicore");}
+        }
         let now = Instant::now();
         let totals = TrafficTotals {
             upload_total: snap.upload_total,
@@ -1147,6 +1190,16 @@ impl Runtime {
             return Ok(self.status(store));
         }
 
+        if matches!(store.settings.runtime_source(), RuntimeSource::Generated)
+            && store.settings.auto_select==crate::domain::AutoSelectMode::Off {
+            let enabled=store.enabled_nodes();
+            let node=enabled.iter().find(|n|Some(&n.id)==store.settings.current_node_id.as_ref())
+                .ok_or_else(||AppError::Config("selection.choose_node_before_connect".into()))?;
+            if !CoreKind::parse(&store.settings.core_type).supports_node(node) && !node_delegatable(&store.settings,node) {
+                return Err(AppError::Config("selection.unsupported_node".into()));
+            }
+        }
+        self.split_generated = matches!(store.settings.runtime_source(), RuntimeSource::Generated);
         match store.settings.runtime_source() {
             RuntimeSource::Singbox { id } => {
                 return self.start_custom_proxy(
@@ -1258,6 +1311,7 @@ impl Runtime {
         let mut opts = build_options(store, secret.clone());
         opts.sidecar = sidecar_plan.clone();
         let built = build_singbox_config(&nodes, &opts)?;
+        validate_manual_generated_selection(store, &built.selected_tag)?;
         let config_path = write_active_config(app_data_dir, &built)?;
         if store.settings.current_node_id.is_none() {
             if let Some(first) = nodes.first() {
@@ -1315,6 +1369,8 @@ impl Runtime {
             ));
         }
         self.api = Some(api);
+        self.split_traffic.reset();
+        self.actual_node_id = if matches!(store.settings.runtime_source(), RuntimeSource::Generated) && !store.settings.auto_select.is_kernel() { store.settings.current_node_id.clone() } else {None};
         self.core_started_at = Some(now_unix_secs());
 
         // Main core healthy — now bring up the companion sidecars (if
@@ -1569,6 +1625,7 @@ impl Runtime {
             xray_opts.tun_interface_name = Some(pick_free_darwin_utun_name());
         }
         let built = build_xray_config(&nodes, &xray_opts)?;
+        validate_manual_generated_selection(store, &built.selected_tag)?;
         let config_path = write_active_config(app_data_dir, &built)?;
         // The generator falls back to the first supported node when the
         // persisted pick is incompatible (or absent) — mirror that here so
@@ -1679,6 +1736,8 @@ impl Runtime {
             );
         }
         self.xray_metrics = Some(metrics);
+        self.split_traffic.reset();
+        self.actual_node_id = if matches!(store.settings.runtime_source(), RuntimeSource::Generated) && !store.settings.auto_select.is_kernel() { store.settings.current_node_id.clone() } else {None};
         self.core_started_at = Some(now_unix_secs());
 
         if enable_system_proxy {
@@ -1777,6 +1836,7 @@ impl Runtime {
         // Reuse the persisted clash_api secret (same policy as sing-box).
         let secret = resolve_clash_api_secret(store);
         let built = build_mihomo_config(&nodes, &build_options(store, secret.clone()))?;
+        validate_manual_generated_selection(store, &built.selected_tag)?;
         let config_path = write_active_yaml_config(app_data_dir, &built.yaml)?;
         // Mirror the selected node onto the store when the persisted pick is
         // absent or incompatible (the generator falls back likewise), so the
@@ -1862,6 +1922,8 @@ impl Runtime {
         }
         self.api = Some(api);
         self.xray_metrics = None;
+        self.split_traffic.reset();
+        self.actual_node_id = if matches!(store.settings.runtime_source(), RuntimeSource::Generated) && !store.settings.auto_select.is_kernel() { store.settings.current_node_id.clone() } else {None};
         self.core_started_at = Some(now_unix_secs());
 
         if enable_system_proxy {
@@ -2005,6 +2067,8 @@ impl Runtime {
             self.api = None;
             self.wait_custom_process_alive("sing-box")?;
         }
+        self.split_traffic.reset();
+        self.actual_node_id = if matches!(store.settings.runtime_source(), RuntimeSource::Generated) && !store.settings.auto_select.is_kernel() { store.settings.current_node_id.clone() } else {None};
         self.core_started_at = Some(now_unix_secs());
 
         if enable_system_proxy {
@@ -2100,6 +2164,8 @@ impl Runtime {
             self.api = None;
             self.wait_custom_process_alive("mihomo")?;
         }
+        self.split_traffic.reset();
+        self.actual_node_id = if matches!(store.settings.runtime_source(), RuntimeSource::Generated) && !store.settings.auto_select.is_kernel() { store.settings.current_node_id.clone() } else {None};
         self.core_started_at = Some(now_unix_secs());
 
         if enable_system_proxy {
@@ -2168,6 +2234,8 @@ impl Runtime {
         self.api = None;
         self.xray_metrics = None;
         self.wait_custom_process_alive("Xray")?;
+        self.split_traffic.reset();
+        self.actual_node_id = if matches!(store.settings.runtime_source(), RuntimeSource::Generated) && !store.settings.auto_select.is_kernel() { store.settings.current_node_id.clone() } else {None};
         self.core_started_at = Some(now_unix_secs());
 
         if enable_system_proxy {
@@ -2281,6 +2349,7 @@ impl Runtime {
         // in use" even though the old one just stopped cleanly.
         self.core.await_owned_ports_released();
         self.core_started_at = None;
+        self.split_traffic.finish();
         self.clear_live_connections();
         Ok(())
     }
@@ -2346,6 +2415,7 @@ impl Runtime {
         self.clear_live_connections();
         self.traffic_prev = None;
         self.traffic_speed = (0, 0);
+        self.split_traffic.finish();
         proxy_cleared
     }
 }
@@ -2412,8 +2482,8 @@ fn readiness_failure_detail(
 
 /// Shared BuildOptions for both generators (sing-box and Xray). The api
 /// secret is only consumed by the sing-box clash_api; Xray ignores it.
-fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
-    BuildOptions {
+pub(crate) fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
+    let mut opts = BuildOptions {
         mixed_port: store.settings.mixed_port,
         allow_lan: store.settings.allow_lan,
         api_port: store.settings.api_port,
@@ -2430,6 +2500,7 @@ fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
         dns: store.dns.clone(),
         outbound_mode: store.settings.outbound_mode,
         route_final: store.settings.route_final.clone(),
+        selected_apps_only: store.settings.selected_apps_only,
         auto_select: store.settings.auto_select,
         probe_url: store.settings.probe_url.clone(),
         find_process: store.settings.find_process,
@@ -2440,7 +2511,9 @@ fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
         sidecar: None,
         tls_fragment_singbox: store.settings.tls_fragment_singbox,
         tls_fragment_xray: store.settings.tls_fragment_xray,
-    }
+    };
+    crate::routing::materialize_pools(&mut opts, store);
+    opts
 }
 
 /// Delegated nodes per sidecar plan cap this high; the rest stay native.
@@ -2883,6 +2956,20 @@ mod clash_api_secret_tests {
 mod sidecar_plan_tests {
     use super::*;
     use crate::domain::{ProtocolConfig, ProxyChain, TlsConfig, Transport};
+
+    #[test]
+    fn manual_generated_selection_rejects_a_generator_fallback() {
+        let mut store = AppStore::default();
+        let picked = node("picked", Protocol::Vless);
+        store.settings.current_node_id = Some(picked.id.clone());
+        let mut saved = serde_json::to_value(&picked).unwrap();
+        saved["subscription_id"] = "profile".into();
+        store.nodes.push(serde_json::from_value(saved).unwrap());
+        assert!(validate_manual_generated_selection(&store, &outbound_tag(&picked)).is_ok());
+        assert!(validate_manual_generated_selection(&store, "node-unrelated").is_err());
+        store.settings.auto_select = crate::domain::AutoSelectMode::Kernel;
+        assert!(validate_manual_generated_selection(&store, "node-unrelated").is_ok());
+    }
 
     fn node(id: &str, protocol: Protocol) -> ProxyNode {
         let config = match protocol {

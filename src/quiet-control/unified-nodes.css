@@ -1,0 +1,16 @@
+.unified-node-sourcebar,.unified-node-connection {display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;min-width:0}
+.unified-node-sourcebar select {max-width:320px;min-width:160px}
+.unified-node-connection {border:1px solid var(--qc-line);border-radius:12px;padding:12px;background:var(--qc-panel)}
+.unified-node-connection .node-selection-info {flex:1 1 220px;min-width:0;overflow-wrap:anywhere}
+.unified-node-connection small {display:block;color:var(--qc-muted);line-height:1.5}
+.unified-source-overlay {position:fixed;inset:0;background:var(--qc-overlay);z-index:45;display:flex;justify-content:flex-end}
+.unified-source-drawer {width:min(720px,100%);background:var(--qc-panel);border-left:1px solid var(--qc-line);height:100%;overflow:auto;padding:20px;min-width:0}
+.unified-source-drawer>.source-close {display:flex;justify-content:flex-end;margin-bottom:8px}
+.source-management .source-management-list .profile-workspace-list {width:100%;min-width:0}
+.qc2-root .source-management .profile-workspace-list {position:static;max-height:none;overflow:visible}
+.qc2-root .source-management .profile-workspace-list .config-groups {max-height:none;overflow:visible}
+.source-management .config-grid {grid-template-columns:minmax(0,1fr)}
+.source-management .sub-card {padding:12px}
+.source-management .page-header {align-items:flex-start;flex-wrap:wrap}
+.source-management .sub-card-meta {margin-top:6px}
+.source-delete-confirm {max-width:520px}

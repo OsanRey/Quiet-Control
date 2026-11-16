@@ -805,7 +805,7 @@ export function NodeDraftFields({ value, disabled, onChange }: Props) {
           )}
           {value.network === "grpc" && (
             <label className="field">
-              <span>Service Name</span>
+              <span>{t("nodeDraft.serviceName")}</span>
               <input
                 value={value.serviceName ?? ""}
                 onChange={(e) => set({ serviceName: e.target.value })}

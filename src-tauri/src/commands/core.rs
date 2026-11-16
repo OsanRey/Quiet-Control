@@ -335,6 +335,9 @@ pub async fn set_core_type(
         let running = state.is_core_running();
         let settings = state
             .with_store_mut(|store| {
+                let mut routing_document=crate::routing::Document::from_store(store);
+                routing_document.core=parsed.as_str().into();
+                crate::routing::ensure(&routing_document,store)?;
                 store.settings.core_type = parsed.as_str().to_string();
                 // Multi-core mode hangs off the sing-box config: switching to
                 // another core auto-disables it (the running sidecar stops

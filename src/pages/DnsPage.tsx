@@ -1,7 +1,9 @@
+import { diagnosticAliases } from "../quiet-control/ruleNames";
+import { diagnosticText } from "../quiet-control/diagnostics";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   diagnoseDns,
-  getDnsSettings,
+  getDnsSettings, listRuleSets,
   updateDnsSettings,
 } from "../api";
 import { GlassButton } from "../components/GlassButton";
@@ -14,7 +16,7 @@ import type {
   DnsDiagnosisReport,
   DnsFinalStrategy,
   DnsPathStrategy,
-  DnsSettings,
+  DnsSettings, RuleSetSummary,
 } from "../types";
 
 /** Default diagnosis list — foreign sites plus one domestic site so both
@@ -24,7 +26,7 @@ const PRESET_DIAG_DOMAINS = [
   "x.com",
   "youtube.com",
   "github.com",
-  "baidu.com",
+  "example.com",
 ];
 
 /** Cap for user-added domains (mirrors the backend's per-run cap). */
@@ -100,6 +102,9 @@ function SettingRow({
 
 export function DnsPage({ embedded = false }: { embedded?: boolean }) {
   const { t } = useI18n();
+  const [ruleSets, setRuleSets] = useState<RuleSetSummary[]>([]);
+  const aliases=diagnosticAliases(ruleSets);
+  const localize=(text:string)=>diagnosticText(text,aliases);
   const [dns, setDns] = useState<DnsSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -131,6 +136,7 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
 
   useEffect(() => {
     void reload();
+    void listRuleSets().then(setRuleSets).catch(()=>{});
   }, [reload]);
 
   async function save(next: DnsSettings) {
@@ -473,7 +479,7 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
                 </span>
                 {diagReport.notes.map((note) => (
                   <span key={note} className="dns-diag-note">
-                    {note}
+                    {localize(note)}
                   </span>
                 ))}
               </div>
@@ -525,7 +531,7 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
                                     ? path.strategy === "local"
                                       ? t("dns.leakRiskLocal")
                                       : t("dns.leakRiskDomestic")
-                                    : (path.note ?? undefined)
+                                    : (path.note ? localize(path.note) : undefined)
                                 }
                               >
                                 {leak ? "⚠ " : ""}
@@ -546,19 +552,19 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
                         </td>
                         <td
                           className="dns-diag-td-match"
-                          title={path?.matched_by ?? ""}
+                          title={localize(path?.matched_by ?? "")}
                         >
-                          {path?.matched_by ?? ""}
+                          {localize(path?.matched_by ?? "")}
                         </td>
                         <td
                           className="mono dns-diag-td-server"
-                          title={path?.servers.join("\n") ?? ""}
+                          title={localize(path?.servers.join("\n") ?? "")}
                         >
-                          {path?.servers[0] ?? ""}
+                          {localize(path?.servers[0] ?? "")}
                         </td>
                         <td
                           className="dns-diag-td-query"
-                          title={queryTitle || (result?.query_note ?? "")}
+                          title={localize(queryTitle || (result?.query_note ?? ""))}
                         >
                           {query ? (
                             query.error ? (
@@ -573,14 +579,14 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
                               >
                                 {query.status_text || "OK"}
                                 {firstAnswer ? ` · ${firstAnswer}` : ""}
-                                {` · ${query.elapsed_ms} ms`}
+                                {` · ${query.elapsed_ms} ${t("stage3.ms")}`}
                                 {query.answers.length > 1
                                   ? ` +${query.answers.length - 1}`
                                   : ""}
                               </span>
                             )
                           ) : result?.query_note ? (
-                            <span className="muted">{result.query_note}</span>
+                            <span className="muted">{localize(result.query_note)}</span>
                           ) : (
                             <span className="muted">—</span>
                           )}

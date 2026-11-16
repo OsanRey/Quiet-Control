@@ -1,3 +1,6 @@
+import { redactSecrets } from "../quiet-control/privacy";
+import {describeImportSkip,isServiceEntry} from "../quiet-control/importReport";
+import {explainOperationError} from '../quiet-control/operationErrors';
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   activateSubscription,
@@ -7,15 +10,23 @@ import {
   addSubscriptionText,
   addSubscriptionUrl,
   getSettings,
+  getProxyStatus,
   getSubscription,
   getSubscriptionCoreSupport,
   getSubscriptionRawConfig,
   listSubscriptions,
+  listSubscriptionNodes,
+  testSubscriptionNodes,
   listSubscriptionUrls,
   peekSettings,
   refreshSubscription,
   removeSubscription,
   setMixMode,
+  setCurrentNode,
+  startProxy,
+  stopProxy,
+  updateSettings,
+  toggleFavoriteNode,
   updateSubscription,
 } from "../api";
 import {
@@ -29,12 +40,18 @@ import { useImportIntent } from "../ImportIntentContext";
 import { getVersion } from "@tauri-apps/api/app";
 import { useI18n } from "../i18n";
 import { ErrorModal } from "../components/ErrorModal";
+import { useCoreBusy, trackCoreBusy } from "../coreBusy";
+import { useVisibleInterval } from "../hooks/useVisibleInterval";
 import type {
   CoreSupportReport,
   ImportResult,
   SubscriptionTraffic,
   SubscriptionUrlEntry,
   SubscriptionView,
+  ProxyNode,
+  LatencyResult,
+  AppSettings,
+  ProxyStatus,
 } from "../types";
 
 
@@ -45,13 +62,15 @@ interface SkippedReport {
   name: string;
   source: string;
   format: string | null;
+  imported: number;
   skipped: { name?: string | null; reason: string }[];
 }
 
 function skippedEntry(result: ImportResult): SkippedReport {
   return {
     name: result.subscription.name,
-    source: result.subscription.source_display,
+    imported: result.node_count,
+    source: redactSecrets(result.subscription.source_display),
     format: result.subscription.format ?? null,
     skipped: result.skipped ?? [],
   };
@@ -211,6 +230,8 @@ function typeTagLabel(
   switch (item.format) {
     case "clash_yaml":
       return t("config.typeMihomo");
+    case "xray_json":
+      return t("config.typeXray");
     case "singbox_json":
       return t("config.typeSingbox");
     case "uri_list":
@@ -297,12 +318,15 @@ function ConfigGroup({
   empty,
   items,
   renderCard,
+  hideEmpty=false,
 }: {
   title: string;
   empty: string;
   items: SubscriptionView[];
   renderCard: (item: SubscriptionView) => ReactNode;
+  hideEmpty?: boolean;
 }) {
+  if(hideEmpty&&items.length===0)return null;
   return (
     <section className="config-group">
       <h2 className="config-group-title">{title}</h2>
@@ -315,10 +339,36 @@ function ConfigGroup({
   );
 }
 
-export function ConfigPage() {
+export function ConfigPage({managementOnly=false,onChanged,onSourceSelected}:{managementOnly?:boolean;onChanged?:()=>void;onSourceSelected?:(id:string)=>void}={}) {
   const { t } = useI18n();
   const { prefill, token, consume, dismiss } = useImportIntent();
   const [items, setItems] = useState<SubscriptionView[]>([]);
+  const [viewedProfile, setViewedProfile] = useState<SubscriptionView | null>(null);
+  const [profileSettings, setProfileSettings] = useState<AppSettings | null>(null);
+  const [profileStatus, setProfileStatus] = useState<ProxyStatus | null>(null);
+  const [profileSort, setProfileSort] = useState('default');
+  const [profileTestKind, setProfileTestKind] = useState<'tcp'|'proxy'>(()=>peekSettings()?.core_type==='xray'?'tcp':'proxy');
+  const coreBusy=useCoreBusy();
+  useVisibleInterval(async()=>{try{setProfileStatus(await getProxyStatus());}catch{/* keep last confirmed status */}},2500);
+  const [profileNodes, setProfileNodes] = useState<ProxyNode[]>([]);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileQuery, setProfileQuery] = useState('');
+  const [selectingNode, setSelectingNode] = useState(false);
+  const [profileTesting, setProfileTesting] = useState<Set<string>>(new Set());
+  const [profileResults, setProfileResults] = useState<Map<string, LatencyResult>>(new Map());
+  useEffect(() => {
+    if (!viewedProfile || managementOnly) return;
+    let cancelled = false;
+    setProfileNodes([]);setProfileResults(new Map());setProfileQuery('');setProfileError(null);setProfileLoading(true);
+    // Reads the persisted node cache, including inactive subscriptions. No fetch,
+    // enable mutation or core restart is allowed while merely browsing.
+    void listSubscriptionNodes(viewedProfile.id).then(nodes => {
+      if (!cancelled) setProfileNodes(nodes);
+    }).catch(error => {if (!cancelled) setProfileError(String(error));})
+      .finally(() => {if (!cancelled) setProfileLoading(false);});
+    return () => {cancelled = true;};
+  }, [viewedProfile?.id]);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [skippedReport, setSkippedReport] = useState<SkippedReport[] | null>(null);
@@ -340,12 +390,15 @@ export function ConfigPage() {
   const [actionId, setActionId] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [menuId, setMenuId] = useState<string | null>(null);
+  const [deleteTarget,setDeleteTarget]=useState<SubscriptionView|null>(null);
+  const [deleteBlocked,setDeleteBlocked]=useState(false);
   const [renameProfile, setRenameProfile] = useState<SubscriptionView | null>(
     null,
   );
   // Raw-config viewer: `null` = closed, body starts undefined (loading).
   const [rawProfile, setRawProfile] = useState<SubscriptionView | null>(null);
   const [rawBody, setRawBody] = useState<string | null | undefined>(undefined);
+  const [revealRaw, setRevealRaw] = useState(false);
   const [rawCopied, setRawCopied] = useState(false);
   // Core-support panel: `null` = closed, report starts undefined (loading).
   const [supportProfile, setSupportProfile] = useState<SubscriptionView | null>(null);
@@ -354,7 +407,7 @@ export function ConfigPage() {
   );
   const [supportCopied, setSupportCopied] = useState(false);
 
-  const busy = refreshingAll || actionId != null;
+  const busy = refreshingAll || actionId != null || selectingNode || profileTesting.size > 0 || coreBusy;
 
   const reload = useCallback(async () => {
     setListError(null);
@@ -364,8 +417,13 @@ export function ConfigPage() {
         getSettings(),
       ]);
       setItems(list);
+      onChanged?.();
       setMixModeState(!!settings.mix_mode);
       setRuntimeSource(settings.runtime_source || "generated");
+      setProfileSettings(settings);
+      if(settings.core_type==='xray')setProfileTestKind('tcp');
+      setProfileStatus(await getProxyStatus());
+      setViewedProfile(previous=>previous&&list.some(p=>p.id===previous.id)?previous:list.find(p=>p.source_kind!=='custom'&&p.enabled)??list.find(p=>p.source_kind!=='custom')??null);
     } catch (e) {
       setListError(typeof e === "string" ? e : String(e));
     } finally {
@@ -428,12 +486,54 @@ export function ConfigPage() {
     };
   }, [menuId]);
 
+  async function pickProfileNode(id: string) {
+    if (busy || runtimeSource !== "generated") return;
+    setSelectingNode(true);
+    setProfileError(null);
+    try {
+      await setCurrentNode(id);
+      await reload();
+    } catch (error) {
+      setProfileError(String(error));
+    } finally {
+      setSelectingNode(false);
+    }
+  }
+
+  async function checkProfileNodes(throughProxy: boolean, ids: string[]) {
+    if (busy || !viewedProfile || !ids.length) return;
+    setProfileError(null);setProfileTesting(new Set(ids));
+    setProfileResults(previous => {const next=new Map(previous);for(const id of ids)next.delete(id);return next;});
+    const accept = (r: LatencyResult) => {
+      setProfileResults(previous => new Map(previous).set(r.id,r));
+      // Keep the operation busy until the temporary child is stopped too.
+    };
+    try {
+      const batch = await testSubscriptionNodes(viewedProfile.id, ids, throughProxy, accept);
+      for (const result of batch.results) accept(result);
+    } catch (error) {setProfileError(String(error));}
+    finally {setProfileTesting(new Set());}
+  }
+
+  async function changeProfileMode(mode: 'off'|'smart'|'kernel') {
+    if(busy)return;setSelectingNode(true);setProfileError(null);
+    try{await trackCoreBusy(updateSettings({autoSelect:mode}),700);await reload();}catch(error){setProfileError(String(error));}
+    finally{setSelectingNode(false);}
+  }
+
+  async function toggleProfileConnection() {
+    if(busy)return;setSelectingNode(true);setProfileError(null);
+    try{if(profileStatus?.running)await stopProxy();else await startProxy(profileSettings?.capture_mode==='system');await reload();}
+    catch(error){setProfileError(String(error));}finally{setSelectingNode(false);}
+  }
+
   async function onActivate(id: string) {
     if (busy) return;
     setListError(null);
     try {
       const list = await activateSubscription(id);
       setItems(list);
+      onChanged?.();
     } catch (e) {
       setListError(typeof e === "string" ? e : String(e));
     }
@@ -449,6 +549,7 @@ export function ConfigPage() {
       // policy may collapse multi-enabled → reload list
       const list = await listSubscriptions();
       setItems(list);
+      onChanged?.();
     } catch (e) {
       setListError(typeof e === "string" ? e : String(e));
     }
@@ -488,6 +589,7 @@ export function ConfigPage() {
         autoUpdate: !!d.auto_update,
         autoUpdateIntervalMin: d.auto_update_interval_min ?? 1440,
         userAgent: d.user_agent ?? "",
+        http: d.http,
       });
       setModalOpen(true);
     } catch (e) {
@@ -519,6 +621,7 @@ export function ConfigPage() {
           autoUpdate,
           autoUpdateIntervalMin,
           userAgent: payload.userAgent ?? null,
+          http: payload.http,
         });
       } else if (payload.kind === "url") {
         importResult = await addSubscriptionUrl(
@@ -528,6 +631,7 @@ export function ConfigPage() {
           autoUpdate,
           autoUpdateIntervalMin,
           payload.userAgent ?? null,
+          payload.http,
         );
       } else if (payload.kind === "file") {
         importResult = await addSubscriptionFile(
@@ -552,6 +656,7 @@ export function ConfigPage() {
       setEditInitial(null);
       dismiss();
       await reload();
+      if(importResult&&importResult.subscription.source_kind!=='custom'){setViewedProfile(importResult.subscription);setProfileNodes(await listSubscriptionNodes(importResult.subscription.id));}
       maybeReportSkipped(importResult);
     } catch (e) {
       setImportError(typeof e === "string" ? e : String(e));
@@ -576,7 +681,7 @@ export function ConfigPage() {
     const total = skippedReport.reduce((n, r) => n + r.skipped.length, 0);
     const lines = [
       t("config.reportTitle", { v: version }),
-      t("config.reportTotal", { n: total }),
+      t("importReport.skipped", { n: total }),
     ];
     for (const r of skippedReport) {
       lines.push(
@@ -584,11 +689,12 @@ export function ConfigPage() {
         `${t("config.reportProfile", { name: r.name })}${r.format ? `（${r.format}）` : ""}`,
         t("config.reportSource", { source: r.source }),
       );
+      lines.push(t("importReport.accepted",{n:r.imported}), t("importReport.service",{n:r.skipped.filter(item=>isServiceEntry(item.reason)).length}));
       r.skipped.forEach((item, i) => {
-        lines.push(`  ${i + 1}. ${item.name || t("config.skippedUnnamed")} — ${item.reason}`);
+        lines.push(`  ${i + 1}. ${item.name || t("config.skippedUnnamed")} — ${describeImportSkip(item.reason)} [${item.reason}]`);
       });
     }
-    const text = lines.join("\n");
+    const text = redactSecrets(lines.join("\n"));
     try {
       await navigator.clipboard.writeText(text);
       setSkippedCopied(true);
@@ -611,6 +717,7 @@ export function ConfigPage() {
     try {
       const result = await refreshSubscription(id);
       await reload();
+      if(viewedProfile?.id===id)setProfileNodes(await listSubscriptionNodes(id));
       maybeReportSkipped(result);
     } catch (e) {
       setListError(typeof e === "string" ? e : String(e));
@@ -648,6 +755,7 @@ export function ConfigPage() {
         }
       });
       await reload();
+      if(viewedProfile)setProfileNodes(await listSubscriptionNodes(viewedProfile.id));
       if (skippedReports.length > 0) setSkippedReport(skippedReports);
       if (failed.length > 0) {
         setListError(failed.slice(0, 5).join("；"));
@@ -660,11 +768,20 @@ export function ConfigPage() {
   }
 
   async function onRemove(id: string) {
-    if (!confirm(t("config.confirmDelete"))) return;
+    const target=items.find(item=>item.id===id);if(!target)return;
+    try {
+      const [status,ownedNodes]=await Promise.all([getProxyStatus(),listSubscriptionNodes(id)]);
+      setDeleteTarget({...target,node_count:ownedNodes.length});
+      setDeleteBlocked(status.running && (target.enabled||status.runtime_profile_id===id||ownedNodes.some(n=>n.id===(status.actual_node_id??status.current_node_id))));
+    } catch(error) {setListError(String(error));}
+  }
+
+  async function confirmRemove(id:string){
     setActionId(id);
     setListError(null);
     try {
       await removeSubscription(id);
+      setDeleteTarget(null);
       await reload();
     } catch (e) {
       setListError(typeof e === "string" ? e : String(e));
@@ -678,6 +795,7 @@ export function ConfigPage() {
   async function openRawConfig(profile: SubscriptionView) {
     setRawProfile(profile);
     setRawBody(undefined);
+    setRevealRaw(false);
     setRawCopied(false);
     try {
       const body = await getSubscriptionRawConfig(profile.id);
@@ -744,16 +862,16 @@ export function ConfigPage() {
       if (!items.length) continue;
       lines.push("", t("config.supportUnsupportedSection", { core: coreName(k), n: items.length }));
       items.forEach((item, i) => {
-        lines.push(`  ${i + 1}. ${item.name}（${item.type_label}）— ${item.reason}`);
+        lines.push(`  ${i + 1}. ${item.name}（${item.type_label}）— ${describeImportSkip(item.reason)} [${item.reason}]`);
       });
     }
     if (report.skipped.length > 0) {
       lines.push("", t("config.supportSkippedSection", { n: report.skipped.length }));
       report.skipped.forEach((item, i) => {
-        lines.push(`  ${i + 1}. ${item.name || t("config.skippedUnnamed")} — ${item.reason}`);
+        lines.push(`  ${i + 1}. ${item.name || t("config.skippedUnnamed")} — ${describeImportSkip(item.reason)} [${item.reason}]`);
       });
     }
-    const text = lines.join("\n");
+    const text = redactSecrets(lines.join("\n"));
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -768,30 +886,82 @@ export function ConfigPage() {
     window.setTimeout(() => setSupportCopied(false), 1500);
   }
 
+  const probeFor=(node:ProxyNode)=>profileResults.get(node.id)??node.last_probe??{
+    latency_ms:node.latency_ms,tested_at:node.latency_at??0,method:node.latency_method??'',error:null,
+  };
+  const visibleProfileNodes=profileNodes.filter(n=>(n.name+' '+n.server+' '+n.protocol).toLowerCase().includes(profileQuery.toLowerCase())).sort((a,b)=>{
+    if(profileSort==='name')return a.name.localeCompare(b.name);
+    if(profileSort==='latency')return (probeFor(a).latency_ms??Infinity)-(probeFor(b).latency_ms??Infinity);
+    return 0;
+  });
+  const browsedProfile=items.find(p=>p.id===viewedProfile?.id)??viewedProfile;
+
+  function renderProfilePanel() {
+    if(!browsedProfile)return <section className="profile-workspace-panel"><p>{t('profiles.chooseProfile')}</p></section>;
+    const selectedId=profileStatus?.selected_node_id!==undefined?profileStatus.selected_node_id:profileSettings?.last_manual_node_id??profileSettings?.current_node_id;
+    const actual=!selectingNode&&!coreBusy&&profileStatus?.running&&profileStatus.core_state==='running'?profileStatus.actual_node_id:null;
+    return <section className="profile-browser profile-workspace-panel" aria-labelledby="profile-browser-title">
+      <header className="profile-panel-header"><div><h2 id="profile-browser-title">{browsedProfile.name}</h2><small>{t('profiles.updated')}: {formatRelative(browsedProfile.last_update,t)}</small></div>
+        <GlassButton disabled={busy||browsedProfile.source_kind!=='url'} onClick={()=>void onRefresh(browsedProfile.id)}>{t('common.refresh')}</GlassButton>
+      </header>
+      <p className="profile-chosen-summary"><strong>{t('profiles.selected')}: {profileStatus?.selected_node_name??'—'}</strong>{actual!==selectedId&&actual&&<span>{t('profiles.inUse')}: {profileStatus?.actual_node_name??'—'}</span>}</p>
+      <div className="profile-selection-controls">
+        <label>{t('profiles.selectionMode')}<select value={profileSettings?.auto_select??'off'} disabled={busy||runtimeSource!=='generated'} onChange={e=>void changeProfileMode(e.target.value as 'off'|'smart'|'kernel')}><option value="off">{t('profiles.manual')}</option><option value="smart">{t('profiles.smart')}</option><option value="kernel">{t('profiles.auto')}</option></select></label>
+        <GlassButton disabled={busy||(!profileStatus?.running&&!profileSettings?.current_node_id)} onClick={()=>void toggleProfileConnection()}>{t(profileStatus?.running?'profiles.disconnect':'profiles.connect')}</GlassButton>
+      </div>
+      <p className="field-hint">{t('profiles.browseHint')}</p>{runtimeSource!=='generated'&&<p className="field-hint">{t('profiles.generatedOnly')}</p>}
+      {profileSettings?.retained_node_ids?.includes(profileSettings.current_node_id??'')&&<p className="profile-warning" role="alert">{t('profiles.removedChoice')}</p>}
+      <div className="profile-browser-tools"><input className="search" aria-label={t('nodes.search')} placeholder={t('nodes.search')} value={profileQuery} onChange={e=>setProfileQuery(e.target.value)}/>
+        <select aria-label={t('profiles.sort')} value={profileSort} onChange={e=>setProfileSort(e.target.value)}><option value="default">{t('nodes.sortDefault')}</option><option value="name">{t('nodes.sortName')}</option><option value="latency">{t('nodes.sortLatency')}</option></select>
+      </div>
+      <div className="profile-browser-tools">
+        <select aria-label={t('profiles.checkType')} disabled={busy} value={profileTestKind} onChange={e=>setProfileTestKind(e.target.value as 'tcp'|'proxy')}><option value="tcp">TCP</option><option value="proxy" disabled={profileSettings?.core_type==='xray'}>{t('profiles.proxyResult')}</option></select>
+        <GlassButton disabled={busy||profileLoading||!visibleProfileNodes.length} onClick={()=>void checkProfileNodes(profileTestKind==='proxy',visibleProfileNodes.map(n=>n.id))}>{t('profiles.checkAll')}</GlassButton>
+        {profileTesting.size>0&&<small>{[...profileTesting].filter(id=>profileResults.has(id)).length}/{profileTesting.size}</small>}
+      </div>
+      <p className="field-hint">{t('profiles.checkHint')}</p>
+      {profileLoading?<p>{t('common.loading')}</p>:<div className="profile-browser-nodes">{visibleProfileNodes.map(n=>{
+        const r=probeFor(n);const pending=profileTesting.has(n.id)&&!profileResults.has(n.id);
+        const state=pending?t('nodes.testing'):!r.tested_at?t('stage3.unchecked'):r.method==='unsupported_proxy'?t('profiles.probeUnavailable'):r.method==='unsupported'?t('nodes.pingUnsupported'):r.latency_ms!=null?t('profiles.reachable'):/timeout|timed out|超时|истек|ожидан/i.test(r.error??'')?t('stage3.timeout'):r.error?t('common.error'):t('stage3.noResponse');
+        const selected=selectedId===n.id;
+        return <div className={`profile-browser-node${selected?' is-selected':''}${actual===n.id?' is-active':''}`} key={n.id}>
+          <div className="profile-node-name"><strong title={n.name}>{n.name}</strong><small>{n.protocol.toUpperCase()} · {n.server}:{n.port}</small><span>{selected&&<i>{t('profiles.selected')}</i>}{actual===n.id&&actual!==selectedId&&<i>{t('profiles.inUse')}</i>}{n.retained&&<i className="profile-warning">{t('profiles.removed')}</i>}</span></div>
+          <div className="profile-node-measure" title={redactSecrets(explainOperationError(r.error??''))}><strong>{pending?'…':r.latency_ms!=null?`${r.latency_ms} ${t('stage3.ms')}`:'—'}</strong><small>{state}</small>{r.tested_at>0&&<small>{r.method==='tcp'||r.method==='unsupported'?'TCP':t('profiles.proxyResult')} · {formatRelative(r.tested_at,t)}</small>}</div>
+          <div className="profile-browser-node-actions"><GlassButton disabled={busy} onClick={()=>void checkProfileNodes(profileTestKind==='proxy',[n.id])}>{t('profiles.check')}</GlassButton><GlassButton disabled={busy||runtimeSource!=='generated'||(selected&&profileSettings?.auto_select==='off'&&(!profileStatus?.running||actual===n.id))} onClick={()=>void pickProfileNode(n.id)}>{t('profiles.select')}</GlassButton>
+            <details className="profile-node-menu"><summary aria-label={t('profiles.more')}>⋯</summary><button disabled={busy} onClick={()=>{void toggleFavoriteNode(n.id).then(favorite=>setProfileNodes(previous=>previous.map(x=>x.id===n.id?{...x,favorite}:x))).catch(error=>setProfileError(String(error)));}}>{t(n.favorite?'profiles.unfavorite':'profiles.favorite')}</button></details>
+          </div>
+        </div>;
+      })}{!visibleProfileNodes.length&&<p>{t('profiles.noMatches')}</p>}</div>}
+      {(profileError||profileStatus?.error)&&<p role="alert">{redactSecrets(explainOperationError(profileError??profileStatus?.error??''))}</p>}
+      {mixMode&&runtimeSource==='generated'&&<GlassButton disabled={busy||(browsedProfile.enabled&&profileNodes.some(n=>n.id===profileSettings?.current_node_id))} onClick={()=>void onActivate(browsedProfile.id)}>{t(browsedProfile.enabled?'profiles.disable':'profiles.enable')}</GlassButton>}
+    </section>;
+  }
+
   function renderCard(item: SubscriptionView) {
     const generated = item.source_kind !== "custom";
     // Custom mode: switching the active profile is a runtime-source change
     // (homepage picker) — subscription / local cards become read-only.
-    const clickable = generated && runtimeSource === "generated";
+    const clickable = generated;
     const customActive =
       !generated && runtimeSource === `singbox:${item.id}`;
-    const generatedActive = clickable && item.enabled;
+    const generatedActive = generated && runtimeSource === "generated" && item.enabled;
     const typeTag = typeTagLabel(t, item);
     return (
       <article
         key={item.id}
-        className={`sub-card${generatedActive || customActive ? " enabled" : ""}${
+        data-profile-id={item.id}
+        className={`sub-card${viewedProfile?.id===item.id?" is-browsed":""}${generatedActive || customActive ? " enabled" : ""}${
           clickable ? "" : " readonly"
         }`}
         role={clickable ? "button" : "article"}
         tabIndex={clickable ? 0 : undefined}
-        onClick={clickable ? () => void onActivate(item.id) : undefined}
+        onClick={clickable ? () => {if(!busy){if(managementOnly)onSourceSelected?.(item.id);else setViewedProfile(item);}} : undefined}
         onKeyDown={
           clickable
             ? (e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  void onActivate(item.id);
+                  if(!busy){if(managementOnly)onSourceSelected?.(item.id);else setViewedProfile(item);}
                 }
               }
             : undefined
@@ -809,7 +979,7 @@ export function ConfigPage() {
                 {item.enabled ? "●" : "○"}
               </span>
             ) : null}
-            <h3 title={item.id}>{item.name}</h3>
+            <h3 title={item.name}>{item.name}</h3>
             <div className="sub-card-top-right">
               <span className="sub-card-updated muted">
                 {formatRelative(item.last_update, t)}
@@ -911,13 +1081,14 @@ export function ConfigPage() {
                       type="button"
                       role="menuitem"
                       className="sub-menu-item danger"
+                      data-testid="source-delete"
                       disabled={busy}
                       onClick={() => {
                         setMenuId(null);
                         void onRemove(item.id);
                       }}
                     >
-                      {t("config.menuDelete")}
+                      🗑 {t("sources.delete")}
                     </button>
                   </div>
                 )}
@@ -938,16 +1109,17 @@ export function ConfigPage() {
             {typeTag && <span className="sub-type-tag">{typeTag}</span>}
           </div>
           <TrafficBlock traffic={item.traffic} />
+          {managementOnly&&mixMode&&generated&&<GlassButton disabled={busy||(profileStatus?.running&&item.enabled&&(!profileStatus.runtime_profile_id||item.id===profileStatus.runtime_profile_id))} onKeyDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();void onActivate(item.id)}}>{t(item.enabled?'profiles.disable':'profiles.enable')}</GlassButton>}
         </div>
       </article>
     );
   }
 
   return (
-    <div className="page config-page">
+    <div className={`page config-page${managementOnly ? " source-management" : ""}`}>
       <header className="page-header">
         <div>
-          <h1>{t("config.title")}</h1>
+          <h1>{t(managementOnly ? "sources.manage" : "config.title")}</h1>
           <p className="page-desc">{t("config.desc")}</p>
         </div>
         <div className="header-actions">
@@ -986,7 +1158,7 @@ export function ConfigPage() {
           <div className="modal skipped-nodes-modal">
             <header className="modal-header">
               <h2>
-                {t("config.skippedTitle", {
+                {t("importReport.skipped", {
                   n: skippedReport.reduce((sum, r) => sum + r.skipped.length, 0),
                 })}
               </h2>
@@ -1000,12 +1172,12 @@ export function ConfigPage() {
             </header>
             <div className="modal-body">
               <p className="muted" style={{ margin: 0, fontSize: 12 }}>
-                {t("config.skippedHint")}
+                {t("importReport.hint")}
               </p>
               {skippedReport.map((r) => (
                 <div key={r.name + r.source} className="skipped-report-block">
                   <div className="skipped-report-sub">
-                    <strong>{r.name}</strong>
+                    <strong>{r.name}</strong><span>{t("importReport.accepted",{n:r.imported})} · {t("importReport.service",{n:r.skipped.filter(item=>isServiceEntry(item.reason)).length})}</span>
                     {r.format ? <span className="muted mono">{r.format}</span> : null}
                     <span className="muted skipped-report-source">{r.source}</span>
                   </div>
@@ -1013,7 +1185,7 @@ export function ConfigPage() {
                     {r.skipped.map((item, i) => (
                       <li key={i} title={`${item.reason}`}>
                         <span className="skipped-item-name">{item.name || t("config.skippedUnnamed")}</span>
-                        <span className="muted skipped-item-reason">{item.reason}</span>
+                        <span className="muted skipped-item-reason">{describeImportSkip(item.reason)}</span>
                       </li>
                     ))}
                   </ul>
@@ -1032,6 +1204,7 @@ export function ConfigPage() {
         </div>
       )}
 
+      <div className={managementOnly ? "source-management-list" : "profile-workspace"}><aside className="profile-workspace-list">
       {loading ? (
         <div className="empty">{t("common.loading")}</div>
       ) : items.length === 0 ? (
@@ -1044,13 +1217,13 @@ export function ConfigPage() {
         </div>
       ) : (
         <div className="config-groups">
-          <ConfigGroup
+          <ConfigGroup hideEmpty
             title={t("config.groupSubscription")}
             empty={t("config.groupSubscriptionEmpty")}
             items={items.filter((item) => item.source_kind === "url")}
             renderCard={(item) => renderCard(item)}
           />
-          <ConfigGroup
+          <ConfigGroup hideEmpty
             title={t("config.groupLocal")}
             empty={t("config.groupLocalEmpty")}
             items={items.filter(
@@ -1059,7 +1232,7 @@ export function ConfigPage() {
             )}
             renderCard={(item) => renderCard(item)}
           />
-          <ConfigGroup
+          <ConfigGroup hideEmpty
             title={t("config.groupCustom")}
             empty={t("config.groupCustomEmpty")}
             items={items.filter((item) => item.source_kind === "custom")}
@@ -1068,6 +1241,13 @@ export function ConfigPage() {
         </div>
       )}
 
+      </aside>{!managementOnly && renderProfilePanel()}</div>
+
+      {deleteTarget && <div className="modal-backdrop"><section className="modal source-delete-confirm" data-testid="source-delete-confirm" role="dialog" aria-modal="true" aria-label={t('sources.delete')}>
+        <header className="modal-header"><h2>{t('sources.delete')}</h2></header><div className="modal-body"><p>{t('sources.confirmDelete',{name:deleteTarget.name,n:deleteTarget.node_count})}</p>
+        {deleteBlocked && <p role="status">{t('sources.stopFirst')}</p>}</div><footer className="modal-footer"><GlassButton disabled={busy} onClick={()=>setDeleteTarget(null)}>{t('common.cancel')}</GlassButton>
+        {deleteBlocked ? <GlassButton disabled={busy} onClick={async()=>{try{await stopProxy();setDeleteBlocked(false);await reload()}catch(e){setListError(String(e))}}}>{t('profiles.disconnect')}</GlassButton> : <GlassButton variant="danger" disabled={busy} onClick={()=>void confirmRemove(deleteTarget.id)}>{t('sources.delete')}</GlassButton>}
+        </footer></section></div>}
       <AddConfigModal
         open={modalOpen}
         busy={importing}
@@ -1117,7 +1297,7 @@ export function ConfigPage() {
                   {t("config.rawNone")}
                 </p>
               ) : (
-                <pre className="raw-config-pre">{rawBody}</pre>
+                <><p className="field-hint">{t("stage3.secrets")}</p><GlassButton onClick={()=>setRevealRaw(!revealRaw)}>{t(revealRaw?"stage3.hide":"stage3.reveal")}</GlassButton><pre className="raw-config-pre">{revealRaw ? rawBody : redactSecrets(rawBody)}</pre></>
               )}
             </div>
             <footer className="modal-footer">
@@ -1222,7 +1402,7 @@ export function ConfigPage() {
                             <li key={i} title={item.reason}>
                               <span className="skipped-item-name">{item.name}</span>
                               <span className="muted skipped-item-type">{item.type_label}</span>
-                              <span className="muted skipped-item-reason">{item.reason}</span>
+                              <span className="muted skipped-item-reason">{describeImportSkip(item.reason)}</span>
                             </li>
                           ))}
                         </ul>
@@ -1242,7 +1422,7 @@ export function ConfigPage() {
                             <span className="skipped-item-name">
                               {item.name || t("config.skippedUnnamed")}
                             </span>
-                            <span className="muted skipped-item-reason">{item.reason}</span>
+                            <span className="muted skipped-item-reason">{describeImportSkip(item.reason)}</span>
                           </li>
                         ))}
                       </ul>

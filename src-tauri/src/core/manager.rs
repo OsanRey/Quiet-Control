@@ -236,6 +236,7 @@ impl CoreManager {
     }
 
     pub fn check_config(kind: CoreKind, binary: &Path, config: &Path) -> AppResult<()> {
+        super::trust::verify_binary(kind, binary)?;
         let mut cmd = Command::new(binary);
         cmd.args(kind.check_command_args(config));
         #[cfg(target_os = "windows")]
@@ -322,58 +323,12 @@ impl CoreManager {
     /// unrelated port residue (stale TIME_WAIT, another app) made every such
     /// start feel stuck for no reason.
     pub fn force_free_port(port: u16, residue_wait: Duration) -> AppResult<()> {
-        if Self::is_port_free(port) {
-            return Ok(());
+        let deadline = std::time::Instant::now() + residue_wait;
+        while !Self::is_port_free(port) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
         }
-        let mut killed = kill_listeners_on_port(port);
-
-        // No server socket → the bind failure is teardown residue of a
-        // process that just died (accepted sockets linger in states netstat
-        // doesn't list as LISTENING yet still block a fresh bind — Go cores
-        // never set SO_REUSEADDR on Windows). Wait a bounded moment for the
-        // OS to reclaim them instead of walking the new core into the same
-        // wall; if it still can't clear, fall through to the loop below and
-        // let the start surface the real error.
-        if !port_has_listener(port) {
-            let deadline = std::time::Instant::now() + residue_wait;
-            while !Self::is_port_free(port) && std::time::Instant::now() < deadline {
-                if port_has_listener(port) {
-                    // A real listener appeared mid-wait — skip to the kill
-                    // path below instead of idling out the deadline.
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            if Self::is_port_free(port) {
-                return Ok(());
-            }
-        }
-
-        // Real LISTEN holder: wait briefly for kill to take effect (~360ms max).
-        for i in 0..12 {
-            if Self::is_port_free(port) {
-                return Ok(());
-            }
-            if !port_has_listener(port) {
-                return Ok(());
-            }
-            if i == 4 || i == 8 {
-                killed = kill_listeners_on_port(port);
-            }
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        if Self::is_port_free(port) || !port_has_listener(port) {
-            return Ok(());
-        }
-        let manual = if cfg!(windows) {
-            format!("netstat -ano | findstr :{port}")
-        } else {
-            format!("sudo lsof -iTCP:{port} -sTCP:LISTEN")
-        };
-        let snapshot = port_socket_snapshot(port);
-        Err(AppError::Core(format!(
-            "端口 {port} 仍被占用（已尝试结束监听进程: {killed}）。可手动: {manual}\n当前端口状态: {snapshot}"
-        )))
+        if Self::is_port_free(port) { return Ok(()); }
+        Err(AppError::Core(format!("Port {port} is occupied; research builds never terminate foreign listeners")))
     }
 
     /// Ensure mixed + API ports are free (kill leftovers from previous runs).
@@ -411,6 +366,7 @@ impl CoreManager {
         elevated: bool,
         resource_dir: Option<&Path>,
     ) -> AppResult<()> {
+        crate::core::trust::verify_binary(kind, binary)?;
         match self.start_with_ports_inner(
             kind,
             binary,
@@ -689,10 +645,11 @@ impl CoreManager {
             .as_ref()
             .ok_or_else(|| AppError::Core("log directory missing".into()))?;
         let args = format!(
-            "--satelite-core-helper \"{}\" \"{}\" \"{}\"",
+            "--satelite-core-helper \"{}\" \"{}\" \"{}\" {}",
             escape_windows_arg(binary),
             escape_windows_arg(config),
-            escape_windows_arg(log_dir)
+            escape_windows_arg(log_dir),
+            std::process::id()
         );
 
         let _elevated = match super::elevate::run_elevated(&helper, &args, None) {
@@ -891,13 +848,15 @@ pub fn try_run_elevated_log_helper() -> Option<i32> {
     let marker = args
         .iter()
         .position(|value| value == "--satelite-core-helper")?;
-    if args.len() <= marker + 3 {
+    if args.len() <= marker + 4 {
         return Some(2);
     }
     let binary = PathBuf::from(&args[marker + 1]);
     let config = PathBuf::from(&args[marker + 2]);
     let log_dir = PathBuf::from(&args[marker + 3]);
+    let parent_pid = match args[marker + 4].to_str().and_then(|s| s.parse::<u32>().ok()) { Some(pid) => pid, None => return Some(2) };
     let kind = CoreKind::from_binary_path(&binary);
+    if super::trust::verify_binary(kind, &binary).is_err() { return Some(6); }
     if fs::create_dir_all(&log_dir).is_err() {
         return Some(3);
     }
@@ -919,6 +878,12 @@ pub fn try_run_elevated_log_helper() -> Option<i32> {
         Ok(child) => child,
         Err(_) => return Some(4),
     };
+    use std::os::windows::io::AsRawHandle;
+    if super::elevate::watch_gui_lifetime(parent_pid, child.as_raw_handle()).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Some(7);
+    }
     if super::job::ensure_child_killed_on_parent_exit(child.id()).is_err() {
         let _ = child.kill();
         let _ = child.wait();

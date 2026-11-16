@@ -533,6 +533,7 @@ fn install_downloaded_archive(
     info: &LatestReleaseInfo,
     bytes: Vec<u8>,
 ) -> AppResult<CoreDownloadResult> {
+    crate::core::trust::verify_archive(&info.asset_name, &bytes)?;
     let bin_dir = core_dir(app_data_dir);
     fs::create_dir_all(&bin_dir)?;
     let archive_path = bin_dir.join(&info.asset_name);

@@ -1,7 +1,12 @@
-export type Locale = "zh" | "en";
+import {diagnosticEn, diagnosticRu} from './diagnostic-copy';
+import ruBase from './ru.json';
+import {quietRu, quietEn} from './quiet';
+import {extraRu, extraEn} from './extra';
+export type Locale = "zh" | "en" | "ru";
 
 /** Flat message catalog. Keys are stable; values differ by locale. */
 const en = {
+  ...quietEn, ...extraEn, ...diagnosticEn,
   // common
   "common.loading": "Loading…",
   "common.save": "Save",
@@ -45,7 +50,7 @@ const en = {
   "simple.notRunning": "Not running",
   "simple.testingAria": "Testing",
   "simple.stopping": "Stopping…",
-  "simple.connected": "Connected",
+  "simple.connected": "Core running",
   "simple.loadMore": "Load more ({shown}/{total})",
   "simple.spark": "Activity",
   "simple.sparkIdle": "Waiting for traffic",
@@ -71,8 +76,7 @@ const en = {
   "dashboard.pickConfig": "Choose config",
   "dashboard.pickConfigDefault": "System default",
   "dashboard.pickCore": "Switch core",
-  "dashboard.customProfileNeedsSingbox":
-    "Custom configs are sing-box only — switch the core back to sing-box to use them",
+  "dashboard.customProfileNeedsSingbox": "Select the core required by the imported configuration",
   "dashboard.errorTitle": "Connection error",
   "dashboard.idle": "Idle",
   "dashboard.nodeCount": "Nodes",
@@ -96,8 +100,7 @@ const en = {
   "dashboard.sysProxyDesc":
     "HTTP/HTTPS/SOCKS → local mixed port (core must be running)",
   "dashboard.tunTitle": "TUN",
-  "dashboard.tunDesc":
-    "System-wide capture via utun. First enable authorizes sing-box (setuid; Touch ID via sudo when pam_tid is on; otherwise password once); later start/stop need no password. Re-auth may be needed after core updates.",
+  "dashboard.tunDesc": "System-wide capture through a virtual adapter. Windows requests administrator consent; macOS requires core authorization. Authorization may be needed again after core updates.",
   "dashboard.tunShort": "System-wide capture",
   "dashboard.tunSwitching": "Switching TUN…",
   "dashboard.capture": "Capture",
@@ -108,8 +111,7 @@ const en = {
     "How traffic enters the proxy: Off, System proxy, or TUN (global).",
   "dashboard.captureSwitching": "Switching capture…",
   "dashboard.captureSystemHint": "Set system HTTP/SOCKS to local mixed port",
-  "dashboard.captureTunHint":
-    "Global capture via utun (admin once for service install)",
+  "dashboard.captureTunHint": "Virtual adapter, routes and DNS; administrator privileges required",
   "dashboard.smartSwitch": "Smart switch",
   "dashboard.smartSwitchDesc":
     "On enable: probe and pick best node. Then passive watch + on-demand probe.",
@@ -154,7 +156,7 @@ const en = {
   "dashboard.coreStopping": "Stopping",
   "dashboard.coreSwitching": "Switching core…",
   "dashboard.tunReauthorize": "Reauthorize",
-  "dashboard.coreElevated": "[root]",
+  "dashboard.coreElevated": "[elevated]",
   "dashboard.coreElevatedHint": "The core is running with elevated privileges (macOS: setuid-root; Windows: admin) for TUN mode.",
   "dashboard.version": "Version",
   "dashboard.uptime": "Uptime",
@@ -210,8 +212,7 @@ const en = {
   "settings.hintCore": "Kernel & app versions",
 
   "settings.language": "Language",
-  "settings.languageDesc":
-    "Page content language. Sidebar labels stay English.",
+  "settings.languageDesc": "Language for the entire interface. Applies immediately and is saved.",
   "settings.langZh": "中文",
   "settings.langEn": "ENG",
   "settings.theme": "Appearance",
@@ -281,7 +282,7 @@ const en = {
   "settings.regenerateSecret": "Regenerate",
   "settings.probeUrl": "Latency probe URL",
   "settings.tunStack": "TUN stack",
-  "settings.tunStackHint": "TUN toggle lives on Dashboard · now",
+  "settings.tunStackHint": "Enable TUN on Home → Connection mode.",
   "settings.tunIpv6": "TUN IPv6 address",
   "settings.tunIpv6Desc":
     "Off by default. Most nodes have no IPv6 egress — enabling this on such a node makes Chrome prefer AAAA/v6 and black-holes every connection. Only turn on if your node has real IPv6 egress.",
@@ -333,8 +334,7 @@ const en = {
   "settings.coreCurrent": "Current",
   "settings.coreUser": "user",
   "settings.coreUpdateAvail": "update",
-  "settings.coreHint":
-    "macOS ships a bundled sing-box; a downloaded core takes priority. Switching the active core restarts it.",
+  "settings.coreHint": "Verified cores are bundled. A downloaded core takes priority. Switching the active core restarts it; unreviewed binaries are blocked.",
   "settings.coreHintXray":
     "Xray serves vmess/vless/ss/trojan/socks/http/wireguard with XTLS-Reality. Switching the active core restarts it.",
   "settings.coreHintMihomo":
@@ -848,7 +848,7 @@ const en = {
   "dns.finalStrategy": "Fallback DNS",
   "dns.finalStrategyDesc": "Resolver for sites that match no rule. Prefer remote for foreign sites",
   "dns.finalLocal": "Local",
-  "dns.finalDomestic": "Domestic",
+  "dns.finalDomestic": "Additional direct DNS",
   "dns.finalRemote": "Remote",
   "dns.remoteDns": "Remote encrypted DNS",
   "dns.remoteDnsDesc": "Empty = built-in 1.1.1.1 / 8.8.8.8",
@@ -888,7 +888,7 @@ const en = {
   "dns.removeDomain": "Remove",
   "dns.colStrategy": "Strategy",
   "dns.stRemote": "Remote",
-  "dns.stDomestic": "Domestic",
+  "dns.stDomestic": "Additional direct DNS",
   "dns.stLocal": "Local",
   "dns.stBlock": "Blocked",
   "dns.stHosts": "Hosts",
@@ -1157,6 +1157,7 @@ const en = {
 export type MessageKey = keyof typeof en;
 
 const zh: Record<MessageKey, string> = {
+  ...quietEn, ...extraEn, ...diagnosticEn,
   "common.loading": "加载中…",
   "common.save": "保存",
   "common.saving": "保存中…",
@@ -2263,11 +2264,12 @@ const zh: Record<MessageKey, string> = {
 export const catalogs: Record<Locale, Record<MessageKey, string>> = {
   en,
   zh,
+  ru: {...ruBase, ...quietRu, ...extraRu, ...diagnosticRu},
 };
 
 export function normalizeLocale(raw: string | null | undefined): Locale {
   const v = (raw ?? "").trim().toLowerCase();
-  return v === "en" ? "en" : "zh";
+  return v === "en" ? "en" : "ru";
 }
 
 export function translate(
@@ -2283,3 +2285,9 @@ export function translate(
   }
   return s;
 }
+
+let activeLocale: Locale = 'ru';
+export function setActiveLocale(locale: Locale) { activeLocale = locale; }
+/** Shared translator for callbacks and helpers outside React; provider owns locale. */
+export function q(key: MessageKey, vars?: Record<string,string|number>) { return translate(activeLocale,key,vars); }
+export function currentLocale() { return activeLocale === 'ru' ? 'ru-RU' : 'en-US'; }

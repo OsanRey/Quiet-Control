@@ -101,6 +101,11 @@ pub fn build_main_window<R: Runtime>(app: &tauri::App<R>) {
         }
         match tauri::WebviewWindowBuilder::from_config(app.handle(), window) {
             Ok(builder) => {
+                #[cfg(debug_assertions)]
+                let builder = match std::env::var("SATELITE_TEST_CDP_PORT").ok().and_then(|p| p.parse::<u16>().ok()).filter(|p| *p > 0) {
+                    Some(port) => builder.additional_browser_args(&format!("--remote-debugging-port={port} --remote-debugging-address=127.0.0.1")),
+                    None => builder,
+                };
                 if let Err(error) = builder.data_directory(data_dir.clone()).build() {
                     crate::app_log::error("portable", format!("build main window failed: {error}"));
                 }

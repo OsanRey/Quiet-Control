@@ -228,6 +228,7 @@ struct TrayLabels {
     capture_tun: &'static str,
 }
 
+#[allow(dead_code)] // Retained upstream copy; this fork migrates legacy zh to ru.
 const TRAY_LABELS_ZH: TrayLabels = TrayLabels {
     show: "打开主界面",
     start: "启动代理",
@@ -240,6 +241,13 @@ const TRAY_LABELS_ZH: TrayLabels = TrayLabels {
     capture_off: "关闭",
     capture_system: "系统代理",
     capture_tun: "TUN（全局）",
+};
+
+const TRAY_LABELS_RU: TrayLabels = TrayLabels {
+    show: "Открыть Quiet Control", start: "Запустить прокси", stop: "Остановить прокси",
+    restart: "Перезапустить ядро", copy_env: "Копировать переменные прокси", quit: "Выход",
+    low_memory: "Экономия памяти", capture: "Захват трафика", capture_off: "Локальный прокси",
+    capture_system: "Системный прокси", capture_tun: "TUN (вся система)",
 };
 
 const TRAY_LABELS_EN: TrayLabels = TrayLabels {
@@ -260,11 +268,11 @@ fn tray_labels(app: &AppHandle<impl TauriRuntime>) -> &'static TrayLabels {
     let locale = app
         .try_state::<AppState>()
         .and_then(|s| s.with_store(|st| Ok(st.settings.locale.clone())).ok())
-        .unwrap_or_else(|| "zh".to_string());
+        .unwrap_or_else(|| "ru".to_string());
     if locale.eq_ignore_ascii_case("en") {
         &TRAY_LABELS_EN
     } else {
-        &TRAY_LABELS_ZH
+        &TRAY_LABELS_RU
     }
 }
 

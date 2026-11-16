@@ -1,0 +1,14 @@
+{
+  "archives": {
+    "sing-box-1.13.18-windows-amd64.zip": "65045155ffdc506334f01a4353889657ddfc024f72b394081a9abaef34dfbef3",
+    "Xray-windows-64.zip": "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad",
+    "mihomo-windows-amd64-compatible-v1.19.30.zip": "289fde5e29d37a5b3326480590d8b3551c5bf7f8737290355c19bce74d57a563"
+  },
+  "binaries": {
+    "sing-box.exe": "140c46d667d16b1491f6b830812e846c25aa2b18e68bd695023c69c393ad7081",
+    "xray.exe": "15c2d007954ac53ba69b80ec91242786b3c0b71d52649165b4ca1d5cc96ef8f1",
+    "mihomo.exe": "6ac25fcb26afe8e1bea24b6e6e80805bf884a33232d12e2d78dfa0b6c529ac14",
+    "wintun.dll": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce",
+    "libcronet.dll": "257f966119ffca91d7a2ce110a4b668b865d88bf2ed5339fd06a5644b0d02823"
+  }
+}

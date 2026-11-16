@@ -1,0 +1,11 @@
+.subscription-compat { display: grid; gap: 10px; min-width: 0; }
+.subscription-compat .hint { margin: 0; font-size: 12px; opacity: .75; line-height: 1.5; }
+.subscription-compat > button { justify-self: start; }
+.subscription-http { padding-top: 6px; }
+.subscription-http[open] { display: grid; gap: 10px; }
+.subscription-http summary, .subscription-check summary { cursor: pointer; font-size: 12px; }
+.subscription-check { padding: 12px; border: 1px solid var(--qc-line); border-radius: 10px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.subscription-check p { margin: 6px 0; }
+.subscription-check details { margin-top: 10px; }
+.subscription-compat .checkbox-row { display: flex; gap: 8px; align-items: start; font-size: 12px; line-height: 1.5; }
+.subscription-compat .checkbox-row input { width: auto; flex: 0 0 auto; margin-top: 3px; }

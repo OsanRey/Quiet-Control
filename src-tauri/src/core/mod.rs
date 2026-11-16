@@ -39,3 +39,4 @@ pub use paths::{
     active_core_version, bundled_core_version, detect_platform, inspect_core_bin,
     reset_core_to_bundled, resolve_core_bin, CoreSource,
 };
+pub(crate) mod trust;

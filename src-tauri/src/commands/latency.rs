@@ -2,7 +2,7 @@ use crate::services::latency::{ping_nodes_streaming, probe_nodes_streaming, Late
 use crate::state::AppState;
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{State, Manager};
 
 use super::config::custom_config_nodes;
 
@@ -99,6 +99,7 @@ pub async fn test_nodes_latency(
         crate::state::emit_node_latency_changes(&changes);
     }
 
+    state.with_store_mut(|store| {store.remember_probes(&results);Ok(())}).map_err(|e|e.to_string())?;
     let ok = results.iter().filter(|r| r.latency_ms.is_some()).count();
     let failed = results.len() - ok;
     let method = batch_method(&results);
@@ -152,6 +153,7 @@ pub async fn ping_nodes_latency(
         crate::state::emit_node_latency_changes(&changes);
     }
 
+    state.with_store_mut(|store| {store.remember_probes(&results);Ok(())}).map_err(|e|e.to_string())?;
     let ok = results.iter().filter(|r| r.latency_ms.is_some()).count();
     let failed = results.len() - ok;
     let method = batch_method(&results);
@@ -162,6 +164,77 @@ pub async fn ping_nodes_latency(
         results,
         method,
     })
+}
+
+/// Explicit profile probes never activate a subscription or touch main Runtime.
+#[tauri::command]
+pub async fn test_subscription_nodes(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    ids: Vec<String>,
+    through_proxy: bool,
+    on_result: Channel<LatencyResult>,
+) -> Result<LatencyBatchResult, String> {
+    if ids.is_empty() || ids.len() > 1024 {return Err("Choose between 1 and 1024 nodes to check".into());}
+    if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
+        return Err("Duplicate node IDs in profile check".into());
+    }
+    let (nodes, kind, probe_url) = state.with_store(|store| {
+        if !store.subscriptions.iter().any(|s|s.id==id && s.source.contributes_nodes()) {
+            return Err(crate::error::AppError::NotFound(id.clone()));
+        }
+        let nodes = ids.iter().filter_map(|key|store.nodes.iter()
+            .find(|n|n.subscription_id==id && n.node.id==*key).map(|n|n.node.clone())).collect::<Vec<_>>();
+        Ok((nodes, crate::core::CoreKind::parse(&store.settings.core_type), store.settings.probe_url.clone()))
+    }).map_err(|e|e.to_string())?;
+    if nodes.len()!=ids.len() {return Err("The requested profile nodes changed; reopen the profile".into());}
+    if through_proxy {
+        if let Some(error) = crate::services::profile_probe::proxy_url_error(kind, &probe_url) {
+            return Err(error.into());
+        }
+    }
+    let _flight = if through_proxy {None} else {Some(crate::services::profile_probe::Flight::acquire()?)};
+    let mut results=Vec::new();let mut supported=Vec::new();
+    let tested_at=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    for node in nodes {
+        let reason=if through_proxy {crate::services::profile_probe::unsupported_reason(kind,&node)}
+            else if node.protocol.is_udp_only() || node.protocol==crate::domain::Protocol::WireGuard {Some("probe.no_tcp")}else{None};
+        if let Some(reason)=reason {
+            let r=LatencyResult{id:node.id,name:node.name,latency_ms:None,error:Some(reason.into()),tested_at,method:if through_proxy{"unsupported_proxy"}else{"unsupported"}.into()};
+            stream_result(&on_result,&r);results.push(r);
+        } else {supported.push(node);}
+    }
+    if !supported.is_empty() {
+        if through_proxy {
+            let root = state.app_data_dir.clone();
+            let resources = app.path().resource_dir().ok();
+            let core_nodes = supported.clone();
+            let prepared=tauri::async_runtime::spawn_blocking(move ||
+                crate::services::profile_probe::ProbeCore::start(&root, resources.as_deref(), kind, &core_nodes)
+            ).await.map_err(|e|e.to_string())?;
+            match prepared {
+                Ok(probe)=>{
+                    let batch=tokio::time::timeout(std::time::Duration::from_secs(120), probe_nodes_streaming(
+                        &supported, Some(3000), Some(30), Some(probe.api.clone()), probe_url,
+                        |r|stream_result(&on_result,r), false,
+                    )).await.map_err(|_|"Profile check timed out".to_string())?.map_err(|e|e.to_string())?;
+                    drop(probe);results.extend(batch);
+                }
+                Err(error)=>for node in &supported {
+                    let r=LatencyResult{id:node.id.clone(),name:node.name.clone(),latency_ms:None,error:Some(error.clone()),tested_at,method:"error".into()};
+                    stream_result(&on_result,&r);results.push(r);
+                }
+            }
+        } else {
+            results.extend(ping_nodes_streaming(&supported, Some(3000), Some(30), |r|stream_result(&on_result,r), false)
+                .await.map_err(|e|e.to_string())?);
+        }
+    }
+    if let Ok(changes)=state.apply_latency_results(&results) {crate::state::emit_node_latency_changes(&changes);}
+    state.with_store_mut(|store| {store.remember_probes(&results);Ok(())}).map_err(|e|e.to_string())?;
+    let ok=results.iter().filter(|r|r.latency_ms.is_some()).count();
+    Ok(LatencyBatchResult {tested:results.len(),ok,failed:results.len()-ok,method:batch_method(&results),results})
 }
 
 /// `tcp` / `clash_api` if every result used that method, `mixed` otherwise
@@ -214,6 +287,7 @@ pub async fn test_custom_nodes_latency(
     .await
     .map_err(|e| e.to_string())?;
 
+    state.with_store_mut(|store| {store.remember_probes(&results);Ok(())}).map_err(|e|e.to_string())?;
     let ok = results.iter().filter(|r| r.latency_ms.is_some()).count();
     let failed = results.len() - ok;
     Ok(LatencyBatchResult {

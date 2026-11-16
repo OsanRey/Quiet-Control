@@ -238,7 +238,8 @@ export function groupNodes(
   }
 
   // country
-  const zh = locale !== "en";
+  const zh = locale === "zh";
+  const names = new Intl.DisplayNames([locale], {type:"region"});
   const map = new Map<string, NodeGroup>();
   for (const n of nodes) {
     const region = detectRegion(n.name);
@@ -248,7 +249,7 @@ export function groupNodes(
       g = region
         ? {
             key,
-            label: zh ? region.zh : region.en,
+            label: zh ? region.zh : names.of(region.id) || region.en,
             flag: region.flag,
             nodes: [],
           }

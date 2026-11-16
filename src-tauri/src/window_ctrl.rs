@@ -18,6 +18,9 @@ const PRO_SIZE: (f64, f64) = (960.0, 720.0);
 const SIMPLE_SIZE: (f64, f64) = (420.0, 720.0);
 /// Simple mode lets the user shrink the window; content scrolls below this.
 const SIMPLE_MIN: (f64, f64) = (320.0, 480.0);
+// Quiet Control owns its layout independently of the retired Pro/Simple modes.
+const QUIET_SIZE: (f64, f64) = (1200.0, 900.0);
+const QUIET_MIN: (f64, f64) = (480.0, 480.0);
 /// Both modes may grow past the design size (UI magnifies via CSS zoom) —
 /// only floors apply. Pro cannot shrink below its design size because the
 /// zoom mechanism is scale-up only.
@@ -39,16 +42,16 @@ pub fn write_ui_mode(app_data_dir: &std::path::Path, mode: &str) {
     let _ = fs::write(path, v);
 }
 
-pub fn read_ui_mode(app_data_dir: &std::path::Path) -> &'static str {
-    let path = ui_mode_file(app_data_dir);
-    match fs::read_to_string(path) {
-        Ok(s) if s.trim().eq_ignore_ascii_case("simple") => "simple",
-        _ => "pro",
-    }
+pub fn read_ui_mode(_app_data_dir: &std::path::Path) -> &'static str {
+    // Keep old preference files for compatibility, without restoring a portrait
+    // Simple window around the adaptive Quiet Control shell.
+    "quiet"
 }
 
 fn size_for_ui_mode(mode: &str) -> (f64, f64) {
-    if mode == "simple" {
+    if mode == "quiet" {
+        QUIET_SIZE
+    } else if mode == "simple" {
         SIMPLE_SIZE
     } else {
         PRO_SIZE
@@ -56,7 +59,9 @@ fn size_for_ui_mode(mode: &str) -> (f64, f64) {
 }
 
 fn min_for_ui_mode(mode: &str) -> (f64, f64) {
-    if mode == "simple" {
+    if mode == "quiet" {
+        QUIET_MIN
+    } else if mode == "simple" {
         SIMPLE_MIN
     } else {
         PRO_SIZE
@@ -179,22 +184,28 @@ pub fn restore_main_window_layout<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
     let mode = read_ui_mode(&state.app_data_dir);
-    let Some(layout) = read_window_layout(&state.app_data_dir, mode) else {
-        return;
-    };
-    let (w, h) = layout.size;
+    let layout = read_window_layout(&state.app_data_dir, mode).unwrap_or(WindowLayout {size:size_for_ui_mode(mode),position:None});
     if let Some(win) = app.get_webview_window("main") {
-        let (min_w, min_h) = min_for_ui_mode(mode);
-        let _ = win.set_min_size(Some(LogicalSize::new(min_w, min_h)));
-        let _ = win.set_size(LogicalSize::new(w, h));
-        match layout.position {
-            Some((x, y)) if position_reachable(app, x, y, w, h) => {
-                let _ = win.set_position(LogicalPosition::new(x, y));
-            }
-            _ => {
-                let _ = win.center();
-            }
+        let monitors=app.available_monitors().unwrap_or_default();
+        let monitor=layout.position.and_then(|(x,y)|monitors.iter().find(|m|{
+            let a=m.work_area();let scale=m.scale_factor();
+            x>=a.position.x as f64/scale&&y>=a.position.y as f64/scale&&x<(a.position.x as f64+a.size.width as f64)/scale&&y<(a.position.y as f64+a.size.height as f64)/scale
+        })).cloned().or_else(||win.current_monitor().ok().flatten());
+        let (mut w,mut h)=layout.size;
+        let mut position=layout.position;
+        let mut minimum=min_for_ui_mode(mode);
+        if let Some(m)=monitor {
+            let scale=m.scale_factor();let a=m.work_area();
+            let outer=win.outer_size().ok();let inner=win.inner_size().ok();
+            let (frame_w,frame_h)=outer.zip(inner).map(|(o,i)|((o.width.saturating_sub(i.width) as f64)/scale,(o.height.saturating_sub(i.height) as f64)/scale)).unwrap_or((16.0,39.0));
+            let left=a.position.x as f64/scale;let top=a.position.y as f64/scale;
+            let max_w=(a.size.width as f64/scale-frame_w).max(1.0);let max_h=(a.size.height as f64/scale-frame_h).max(1.0);
+            minimum=(minimum.0.min(max_w),minimum.1.min(max_h));w=w.clamp(minimum.0,max_w);h=h.clamp(minimum.1,max_h);
+            position=position.map(|(x,y)|(x.clamp(left,left+max_w-w),y.clamp(top,top+max_h-h)));
         }
+        let _=win.set_min_size(Some(LogicalSize::new(minimum.0,minimum.1)));
+        let _=win.set_size(LogicalSize::new(w,h));
+        if let Some((x,y))=position {let _=win.set_position(LogicalPosition::new(x,y));}else{let _=win.center();}
     }
 }
 
@@ -393,7 +404,7 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
         let mode = app
             .try_state::<AppState>()
             .map(|s| read_ui_mode(&s.app_data_dir).to_string())
-            .unwrap_or_else(|| "pro".into());
+            .unwrap_or_else(|| "quiet".into());
         // Born at the persisted layout (persist_main_window_layout) so waking
         // from tray shows the final size and position directly — no grow
         // animation, no OS cascade placement.
@@ -444,12 +455,12 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
                 .resizable(true)
                 .min_inner_size(SIMPLE_MIN.0, SIMPLE_MIN.1)
         } else {
-            builder
-                .resizable(true)
-                .min_inner_size(PRO_SIZE.0, PRO_SIZE.1)
+            let minimum=min_for_ui_mode(&mode);
+            builder.resizable(true).min_inner_size(minimum.0,minimum.1)
         };
         match builder.build() {
             Ok(win) => {
+                restore_main_window_layout(app);
                 apply_titlebar_accent(app);
                 // Recreated window ships tao's single-frame icon again.
                 crate::window_icon::apply_to(&win);
@@ -528,6 +539,19 @@ pub fn quit_app<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_layout_is_independent_and_adaptive() {
+        let root = temp_root("quiet-layout");
+        std::fs::create_dir_all(root.join("data")).expect("data");
+        write_ui_mode(&root, "simple");
+        assert_eq!(read_ui_mode(&root), "quiet");
+        assert_eq!(size_for_ui_mode("quiet"), (1200.0, 900.0));
+        assert_eq!(min_for_ui_mode("quiet"), (480.0, 480.0));
+        std::fs::write(window_size_file(&root, "quiet"), "1200 900 100 80").unwrap();
+        assert_eq!(read_window_layout(&root, "quiet").unwrap().size, (1200.0, 900.0));
+        assert!(read_window_layout(&root, "pro").is_none());
+    }
 
     fn temp_root(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("satelite-window-ctrl-{tag}-{}", std::process::id()))

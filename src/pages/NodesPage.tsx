@@ -1,17 +1,18 @@
+import {ConfigPage} from "./ConfigPage";
+import {matchesNodeSource,probeGroups} from "../quiet-control/nodeSources";
+import "../quiet-control/unified-nodes.css";
+import { redactSecrets } from "../quiet-control/privacy";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  generateSingboxConfig,
   getProxyStatus,
+  listSubscriptions, prepareNodeSelection, testSubscriptionNodes, startProxy, stopProxy, updateSettings,
   getSettings,
   listAllNodes,
   listCustomConfigNodes,
-  listNodeIds,
   onNodeLatencyChanged,
   onProxySnapshot,
-  pingNodesLatency,
   setCurrentNode,
   testCustomNodesLatency,
-  testNodesLatency,
   toggleFavoriteNode,
 } from "../api";
 import { GlassButton } from "../components/GlassButton";
@@ -23,11 +24,10 @@ import { useI18n } from "../i18n";
 import { nodeFeatureBadges, nodeTip } from "../nodeTooltip";
 import { groupNodes, type GroupBy } from "../nodeGroups";
 import { GlassSeg } from "../components/GlassSeg";
-import { waitForCoreRestart } from "../coreBusy";
 import { useVirtualRange } from "../hooks/useVirtualRange";
 import { filterCustomNodes, applyCustomLatency, sortNodes, type CustomLatencyMap } from "../customNodes";
-import { createLatencyResultBuffer } from "../latencyStream";
-import type { AutoSelectMode, ProxyNode, SortMode, ViewMode } from "../types";
+import { applyManualLatency, createLatencyResultBuffer } from "../latencyStream";
+import type { AppSettings,ProxyStatus,SubscriptionView, LatencyResult, ProxyNode, SortMode, ViewMode } from "../types";
 
 const VIRTUALIZE_AFTER = 200;
 const LIST_ROW_HEIGHT = 49;
@@ -39,8 +39,6 @@ const NODE_GROUP_H = 30;
  *  they align without relying on native <table> auto-layout (dropped so the
  *  group header row can span full width and grow past a single line).
  *  Columns: lead / name / subscription / proto / host / port / latency. */
-const NODE_LIST_COLS =
-  "40px minmax(0,1.3fr) minmax(0,0.85fr) 90px minmax(0,1fr) 70px 90px";
 /** .node-grid-virtual row gap (10px, tighter than the resting 0.65rem) —
  *  a spanning header row is followed by the gap before the next card row,
  *  so its pitch includes it. */
@@ -85,6 +83,7 @@ function LatencyDisplay({
   testing,
   unsupported,
   unsupportedLabel,
+  failure,
 }: {
   ms?: number | null;
   latencyAt?: number | null;
@@ -93,6 +92,7 @@ function LatencyDisplay({
   /** Overrides the default "start core" note — e.g. after a ping test the
       QUIC-only note applies instead (the core isn't involved at all). */
   unsupportedLabel?: string;
+  failure?: string | null;
 }) {
   const { t } = useI18n();
   if (testing) {
@@ -106,14 +106,15 @@ function LatencyDisplay({
   }
   if (ms != null && ms >= 0) {
     return (
-      <span className={`lat ${latencyClass(ms)}`}>{ms}ms</span>
+      <span className={`lat ${latencyClass(ms)}`}>{ms} {t("stage3.ms")}</span>
     );
   }
   // tested but no value → timeout
   if (latencyAt != null) {
-    return <span className="lat lat-timeout">timeout</span>;
+    const label=failure ? (/timeout|timed out|超时|истек|ожидан/i.test(failure)?t("stage3.timeout"):t("common.error")) : t("stage3.noResponse");
+    return <span className="lat lat-timeout" title={redactSecrets(failure??label)} aria-label={label}>{label}</span>;
   }
-  return <span className="lat lat-none">—</span>;
+  return <span className="lat lat-none" title={t("stage3.unchecked")}>—</span>;
 }
 
 function latencyClass(ms?: number | null) {
@@ -123,16 +124,24 @@ function latencyClass(ms?: number | null) {
   return "lat-slow";
 }
 
-export function NodesPage() {
+export function NodesPage({manageSourcesInitially=0}:{manageSourcesInitially?:number}={}) {
   const { t, locale } = useI18n();
   const [nodes, setNodes] = useState<ProxyNode[]>([]);
+  const [profiles,setProfiles]=useState<SubscriptionView[]>([]);
+  const [source,setSource]=useState(()=>localStorage.getItem('nodes.source.v1')??'all');
+  const [managerOpen,setManagerOpen]=useState(!!manageSourcesInitially);
+  useEffect(()=>{if(manageSourcesInitially)setManagerOpen(true)},[manageSourcesInitially]);
+  const [settings,setSettings]=useState<AppSettings|null>(null);
+  const [status,setStatus]=useState<ProxyStatus|null>(null);
+  const [chosenName,setChosenName]=useState('');
+  useEffect(()=>{localStorage.setItem('nodes.source.v1',source)},[source]);
+
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [autoSelect, setAutoSelect] = useState<AutoSelectMode>("off");
   // Manual click in kernel-auto mode: urltest → selector rebuild restarts the core.
   const [switching, setSwitching] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -159,7 +168,9 @@ export function NodesPage() {
   // silently degrade to a plain TCP ping. Gray it out instead (ping stays).
   const [xrayCore, setXrayCore] = useState(false);
   // Session-only latency results for custom-mode nodes (not persisted backend-side).
+  const [latencyFailures, setLatencyFailures] = useState<Map<string,{at:number;error:string|null}>>(new Map());
   const [customLatency, setCustomLatency] = useState<CustomLatencyMap>(new Map());
+  const manualLatencyRef = useRef(new Map<string, LatencyResult>());
   const [testing, setTesting] = useState(false);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
   // Key of the group a scoped (per-group header button) test is running for;
@@ -192,6 +203,7 @@ export function NodesPage() {
     () =>
       onProxySnapshot((status) => {
         setXrayCore((status.core_type ?? "singbox") === "xray");
+        setStatus(status);
       }),
     [],
   );
@@ -200,10 +212,12 @@ export function NodesPage() {
   // tests elsewhere, smart-switch patrol/scan) arrive as events — rows stay
   // warm without a reload. Guarded by tested_at so an older push never
   // rolls back a fresher streaming result; custom-mode nodes live outside
-  // the store and never receive events.
+  // the store and never receive events. Explicit manual results stay visible
+  // for this page session instead of being replaced by background ranking.
   useEffect(() => {
     if (customRuntime) return;
     return onNodeLatencyChanged((change) => {
+      if (manualLatencyRef.current.has(change.id)) return;
       setNodes((prev) => {
         const idx = prev.findIndex((n) => n.id === change.id);
         if (idx < 0) return prev;
@@ -250,15 +264,19 @@ export function NodesPage() {
     return () => window.removeEventListener("resize", update);
   }, []);
 
+  const reloadRevision=useRef(0);
   const reload = useCallback(async () => {
+    const revision=++reloadRevision.current;
     setError(null);
     try {
-      const settings = await getSettings();
+      const [settings,profileList,currentStatus] = await Promise.all([getSettings(),listSubscriptions(),getProxyStatus()]);
+      if(revision!==reloadRevision.current)return;
+      setSettings(settings);setProfiles(profileList);setStatus(currentStatus);
+      if(source!=="all"&&source!=="local"&&!profileList.some(p=>p.id===source))setSource("all");
       const custom = (settings.runtime_source ?? "generated").startsWith("singbox:");
       setCustomRuntime(custom);
       setXrayCore((settings.core_type ?? "singbox") === "xray");
-      setCurrentId(settings.current_node_id ?? null);
-      setAutoSelect((settings.auto_select as AutoSelectMode) ?? "off");
+      setCurrentId(settings.last_manual_node_id ?? settings.current_node_id ?? null);
       setDelegatedCores(
         settings.multi_core_enabled
           ? new Map(
@@ -274,23 +292,27 @@ export function NodesPage() {
       // grouped (unclear which group new items would land in).
       const all = custom
         ? applyCustomLatency(await listCustomConfigNodes(), customLatency)
-        : await listAllNodes();
-      const filtered = filterCustomNodes(all, query, sortMode, 0, Number.MAX_SAFE_INTEGER);
+        : applyManualLatency(await listAllNodes(true), manualLatencyRef.current);
+      if(revision!==reloadRevision.current)return;
+      setChosenName(all.find(n=>n.id===(settings.last_manual_node_id??settings.current_node_id))?.name??t("stage3.unchecked"));
+      const scoped=custom?all:all.filter(n=>matchesNodeSource(n,source,profileList));
+      const filtered = filterCustomNodes(scoped, query, sortMode, 0, Number.MAX_SAFE_INTEGER);
       setNodes(filtered.nodes);
       setTotal(filtered.total);
     } catch (e) {
+      if(revision!==reloadRevision.current)return;
       setError(typeof e === "string" ? e : String(e));
     } finally {
-      setLoading(false);
+      if(revision===reloadRevision.current)setLoading(false);
     }
-  }, [query, sortMode, customLatency]);
+  }, [query, sortMode, customLatency, source]);
 
   useEffect(() => {
     setLoading(true);
     const timer = window.setTimeout(() => void reload(), 150);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, sortMode]);
+  }, [query, sortMode,source]);
 
   useEffect(() => {
     localStorage.setItem("nodes.viewMode", viewMode);
@@ -503,21 +525,10 @@ export function NodesPage() {
     setBusyId(id);
     setError(null);
     try {
-      const leavingKernel = autoSelect === "kernel";
-      await setCurrentNode(id);
-      setCurrentId(id);
-      setAutoSelect("off");
-      // Running: Clash API hot-switch — UI selection is enough feedback.
-      // Stopped: write active.json so next start uses the new node.
-      const status = await getProxyStatus().catch(() => null);
-      if (!status?.running) {
-        await generateSingboxConfig();
-      } else if (leavingKernel) {
-        // Main group rebuilds urltest → selector: hold the busy feedback
-        // until the core restart finishes.
-        setSwitching(true);
-        await waitForCoreRestart();
-      }
+      await prepareNodeSelection(id);
+      setCurrentId(id);setChosenName(nodes.find(n=>n.id===id)?.name??id);
+      // Read the applied status independently of the newly saved manual target.
+      await getProxyStatus().catch(() => null);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     } finally {
@@ -526,6 +537,18 @@ export function NodesPage() {
     }
   }
 
+  async function probeSavedNodes(ids:string[],throughProxy:boolean,onResult?:(r:LatencyResult)=>void){
+    const results:LatencyResult[]=[];
+    for(const [owner,nodeIds] of probeGroups(ids,nodes)){
+      const batch=await testSubscriptionNodes(owner,nodeIds,throughProxy,onResult);results.push(...batch.results);
+    }
+    return {results};
+  }
+  async function connectChosen(){
+    if(!currentId)return;setBusyId(currentId);setError(null);
+    try{if((settings?.auto_select??'off')==='off')await setCurrentNode(currentId);if(!(await getProxyStatus()).running)await startProxy(settings?.capture_mode==='system');await reload()}
+    catch(error){setError(String(error))}finally{setBusyId(null)}
+  }
   async function onTest(kind: "real" | "ping") {
     if (testing || displayed.length === 0) return;
     // Grayed-out guard: the button is disabled under Xray, but the function
@@ -536,7 +559,7 @@ export function NodesPage() {
     // streams results back) top to bottom of the list as shown. Custom mode
     // probes the extracted (unsaved) nodes as a whole — ids come from the
     // loaded list because they are not in the node store.
-    const ids = customRuntime ? nodes.map((n) => n.id) : await listNodeIds(query, sortMode);
+    const ids = displayed.map((n) => n.id);
     await runBatchTest(kind, ids, null);
   }
 
@@ -566,6 +589,7 @@ export function NodesPage() {
     if (groupKey !== null) setTestingGroupKey(groupKey);
     setError(null);
     const idSet = new Set(ids);
+    for (const id of idSet) manualLatencyRef.current.delete(id);
     setTestingIds(idSet);
 
     // clear prior latency so only spinner shows while testing
@@ -581,6 +605,8 @@ export function NodesPage() {
     // the moment its probe completes; the buffer applies them per animation
     // frame (see latencyStream.ts).
     const buffer = createLatencyResultBuffer((batch) => {
+      for (const [id, result] of batch) manualLatencyRef.current.set(id, result);
+      setLatencyFailures(prev=>{const next=new Map(prev);for(const r of batch.values())next.set(r.id,{at:r.tested_at,error:r.error??null});return next;});
       setUnsupportedIds((prev) => {
         const next = new Set(prev);
         for (const r of batch.values())
@@ -612,6 +638,7 @@ export function NodesPage() {
             // null = failed → show timeout; number = success
             latency_ms: r.latency_ms ?? null,
             latency_at: r.tested_at,
+            latency_method: r.method,
           };
         });
         // Re-sort in place as results stream in so the latency sort mode
@@ -628,8 +655,9 @@ export function NodesPage() {
       const batch = customRuntime
         ? await testCustomNodesLatency(3000, buffer.push)
         : kind === "ping"
-          ? await pingNodesLatency(ids, 3000, buffer.push)
-          : await testNodesLatency(ids, 3000, buffer.push);
+          ? await probeSavedNodes(ids,false,buffer.push)
+          : await probeSavedNodes(ids,true,buffer.push);
+      for (const result of batch.results) buffer.push(result);
       buffer.flushNow();
       setUnsupportedIds((prev) => {
         // This run's ids start fresh (a re-test clears stale marks), then
@@ -674,7 +702,7 @@ export function NodesPage() {
       ),
     );
     try {
-      const batch = await testNodesLatency([id], 3000);
+      const batch = await probeSavedNodes([id],true);
       const r = batch.results.find((x) => x.id === id);
       setUnsupportedIds((prev) => {
         const next = new Set(prev);
@@ -683,6 +711,8 @@ export function NodesPage() {
         return next;
       });
       if (r) {
+        manualLatencyRef.current.set(r.id, r);
+        setLatencyFailures(prev=>new Map(prev).set(r.id,{at:r.tested_at,error:r.error??null}));
         setNodes((prev) => {
           const next = prev.map((n) =>
             n.id === id
@@ -837,7 +867,7 @@ export function NodesPage() {
       ),
     );
     try {
-      const batch = await pingNodesLatency([id], 3000);
+      const batch = await probeSavedNodes([id],false);
       const r = batch.results.find((x) => x.id === id);
       setUnsupportedIds((prev) => {
         const next = new Set(prev);
@@ -846,6 +876,8 @@ export function NodesPage() {
         return next;
       });
       if (r) {
+        manualLatencyRef.current.set(r.id, r);
+        setLatencyFailures(prev=>new Map(prev).set(r.id,{at:r.tested_at,error:r.error??null}));
         setNodes((prev) => {
           const next = prev.map((n) =>
             n.id === id
@@ -971,8 +1003,8 @@ export function NodesPage() {
                   <div
                     key={n.id}
                     className={`node-list-row node-virtual-row ${active ? "row-active" : ""}`}
+                    data-node-id={n.id}
                     style={{
-                      gridTemplateColumns: NODE_LIST_COLS,
                       cursor: customRuntime ? "default" : "pointer",
                     }}
                     {...nodeTip(n, t)}
@@ -1030,6 +1062,7 @@ export function NodesPage() {
                       <LatencyDisplay
                         ms={n.latency_ms}
                         latencyAt={n.latency_at}
+                        failure={latencyFailures.get(n.id)?.at===n.latency_at?latencyFailures.get(n.id)?.error:undefined}
                         testing={isTesting}
                         unsupported={unsupportedIds.has(n.id)}
                         unsupportedLabel={pingNote}
@@ -1112,6 +1145,7 @@ export function NodesPage() {
                       <LatencyDisplay
                         ms={n.latency_ms}
                         latencyAt={n.latency_at}
+                        failure={latencyFailures.get(n.id)?.at===n.latency_at?latencyFailures.get(n.id)?.error:undefined}
                         testing={isTesting}
                         unsupported={unsupportedIds.has(n.id)}
                         unsupportedLabel={pingNote}
@@ -1130,6 +1164,17 @@ export function NodesPage() {
           {t("nodes.customReadOnly")}
         </div>
       )}
+      <div className="unified-node-sourcebar">
+        <label>{t('sources.source')} <select data-testid="node-source" value={source} disabled={customRuntime||testing} onChange={e=>setSource(e.target.value)}><option value="all">{t('sources.all')}</option><option value="local">{t('sources.local')}</option>{profiles.filter(p=>p.source_kind!=='custom').map(p=><option value={p.id} key={p.id}>{p.name}</option>)}</select></label>
+        <GlassButton data-testid="manage-sources" onClick={()=>setManagerOpen(true)}>{t('sources.manage')}</GlassButton>
+      </div>
+      <div className="unified-node-connection">
+        <div className="node-selection-info"><strong>{t('sources.chosen')}: {chosenName||'—'}</strong><small>{t('sources.applied')}: {status?.running ? status.actual_node_name??'—' : t('sources.disconnected')}</small><small>{t('sources.selectionHint')}</small></div>
+        <label>{t('profiles.selectionMode')} <select value={settings?.auto_select??'off'} disabled={!!busyId||customRuntime} onChange={async e=>{try{await updateSettings({autoSelect:e.target.value as 'off'|'smart'|'kernel'});await reload()}catch(error){setError(String(error))}}}><option value="off">{t('profiles.manual')}</option><option value="smart">{t('profiles.smart')}</option><option value="kernel">{t('profiles.auto')}</option></select></label>
+        <GlassButton data-testid="connect-chosen-node" variant="primary" disabled={!currentId||!!busyId||customRuntime} onClick={()=>void connectChosen()}>{t('profiles.connect')}</GlassButton>
+        {status?.running&&<GlassButton disabled={!!busyId} onClick={async()=>{try{await stopProxy();await reload()}catch(error){setError(String(error))}}}>{t('profiles.disconnect')}</GlassButton>}
+      </div>
+      {managerOpen&&<div className="unified-source-overlay" role="dialog" aria-modal="true" aria-label={t('sources.manage')}><section className="unified-source-drawer"><div className="source-close"><GlassButton onClick={()=>{setManagerOpen(false);void reload()}}>{t('common.close')}</GlassButton></div><ConfigPage managementOnly onChanged={()=>void reload()} onSourceSelected={id=>{setSource(id);setManagerOpen(false)}}/></section></div>}
       <header className="page-header">
         <div>
           <h1>{t("nodes.title")}</h1>
@@ -1159,7 +1204,7 @@ export function NodesPage() {
 
           <GlassSeg
             value={sortMode}
-            ariaLabel="sort"
+            ariaLabel={t("nodes.sortDefault")}
             onChange={(v) => setSortMode(v as SortMode)}
             options={[
               { value: "default", label: t("nodes.sortDefault") },
@@ -1262,13 +1307,13 @@ export function NodesPage() {
       ) : viewMode === "list" ? (
         <div className="card table-wrap">
           <div className="node-list">
-            <div className="node-list-head" style={{ gridTemplateColumns: NODE_LIST_COLS }}>
+            <div className="node-list-head">
               <span></span>
               <span>{t("nodes.sortName")}</span>
               <span>{t("nodes.groupSub")}</span>
-              <span>proto</span>
-              <span>host</span>
-              <span>port</span>
+              <span>{t("nodes.fProtocol")}</span>
+              <span>{t("nodes.fServer")}</span>
+              <span>{t("nodes.fPort")}</span>
               <span>{t("nodes.sortLatency")}</span>
             </div>
             <div ref={listPx.containerRef as React.RefObject<HTMLDivElement>}>

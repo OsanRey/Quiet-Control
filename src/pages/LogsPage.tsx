@@ -1,3 +1,4 @@
+import { redactSecrets } from "../quiet-control/privacy";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   clearAppLogs,
@@ -342,7 +343,7 @@ export function LogsPage() {
                   key={e.id}
                   className={`log-line log-${e.level}`}
                   data-level={e.level}
-                  title={e.message}
+                  title={redactSecrets(e.message)}
                   style={{
                     opacity: levelRank(e.level) < levelRank(minLevel) ? 0.5 : 1,
                   }}
@@ -350,7 +351,7 @@ export function LogsPage() {
                   <span className="log-ts">{fmtTs(e.ts_ms)}</span>
                   <span className={`log-lvl log-lvl-${e.level}`}>{e.level}</span>
                   <span className="log-target">{e.target}</span>
-                  <span className="log-msg">{e.message}</span>
+                  <span className="log-msg">{redactSecrets(e.message)}</span>
                 </li>
               ))}
               {appRange.paddingBottom > 0 && (
@@ -371,13 +372,13 @@ export function LogsPage() {
                     key={r.id}
                     className={`log-line core-log-line log-${r.level}`}
                     data-level={r.level}
-                    title={r.msg}
+                    title={redactSecrets(r.msg)}
                   >
                     <span className="log-ts">{r.ts}</span>
                     <span className={`log-lvl log-lvl-${r.level}`}>
                       {r.level}
                     </span>
-                    <span className="log-msg">{r.msg}</span>
+                    <span className="log-msg">{redactSecrets(r.msg)}</span>
                   </li>
                 ))}
               </ul>

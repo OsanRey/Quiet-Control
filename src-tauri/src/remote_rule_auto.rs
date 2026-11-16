@@ -217,6 +217,7 @@ fn due_ids(app: &AppHandle) -> Vec<String> {
                 .rule_sets
                 .iter()
                 .filter_map(|set| {
+                    if crate::routing::policy::retired_china_set(set) {return None;}
                     let remote = set.remote.as_ref()?;
                     let interval =
                         crate::domain::remote_update_interval_secs(&remote.update_interval);
@@ -419,7 +420,7 @@ async fn refresh_inner(app: &AppHandle, id: &str) -> Result<DownloadedRule, Stri
     })
 }
 
-async fn download(url: &str, proxy_port: Option<u16>) -> Result<Vec<u8>, String> {
+pub(crate) async fn download(url: &str, proxy_port: Option<u16>) -> Result<Vec<u8>, String> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(45))
@@ -447,7 +448,7 @@ async fn download(url: &str, proxy_port: Option<u16>) -> Result<Vec<u8>, String>
 /// condition. `contains_ip` feeds the config builder's decision to skip a
 /// DNS-side `rule_set` reference for new-enough sing-box cores — see
 /// `rules_contain_ip_cidr`.
-fn validate_source(bytes: &[u8]) -> Result<(u32, bool), String> {
+pub(crate) fn validate_source(bytes: &[u8]) -> Result<(u32, bool), String> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("远程规则集不是有效的 sing-box source JSON: {error}"))?;
     let rules = value

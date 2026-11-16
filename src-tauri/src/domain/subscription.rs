@@ -302,6 +302,29 @@ impl SubscriptionTraffic {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionClient {
+    #[default]
+    Auto,
+    Happ,
+    V2rayTun,
+    Mihomo,
+    Singbox,
+    Custom,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubscriptionHttp {
+    pub client: SubscriptionClient,
+    pub accept: Option<String>,
+    pub send_device_id: bool,
+    /// Random subscription-local identifier, never derived from hardware.
+    pub device_id: Option<String>,
+    pub last_success: Option<SubscriptionClient>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub id: String,
@@ -330,9 +353,11 @@ pub struct Subscription {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic: Option<SubscriptionTraffic>,
     /// Custom User-Agent for URL fetches. Empty/absent falls back to the
-    /// built-in Clash-like default (see `subscription_user_agent`).
+    /// built-in Clash-like default (see `subscription_http::headers_for`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    #[serde(default)]
+    pub http: SubscriptionHttp,
 }
 
 fn default_auto_update_interval_min() -> u32 {
@@ -401,6 +426,8 @@ pub struct SubscriptionDetail {
     /// Custom User-Agent for URL fetches (empty = built-in default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    #[serde(default)]
+    pub http: SubscriptionHttp,
 }
 
 impl Subscription {
@@ -474,6 +501,7 @@ impl Subscription {
             auto_update_interval_min: self.auto_update_interval_min.max(1),
             traffic: self.traffic.clone(),
             user_agent: self.user_agent.clone(),
+            http: self.http.clone(),
         };
         match &self.source {
             SubscriptionSource::Url { url } => SubscriptionDetail {

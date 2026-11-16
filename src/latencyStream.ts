@@ -1,4 +1,15 @@
-import type { LatencyResult } from "./types";
+import type { LatencyResult, ProxyNode } from "./types";
+
+/** Manual results belong to this page session. Store ranking intentionally keeps
+ * through-proxy results ahead of TCP, so a reload must not replace the test the
+ * user just requested with that different, persisted measurement. */
+export function applyManualLatency(nodes: ProxyNode[], results: ReadonlyMap<string, LatencyResult>): ProxyNode[] {
+  return nodes.map(node => {
+    const result = results.get(node.id);
+    return result ? { ...node, latency_ms: result.latency_ms ?? null,
+      latency_at: result.tested_at, latency_method: result.method } : node;
+  });
+}
 
 /** Buffer per-node results from a streaming batch latency test and apply
  * them once per animation frame — each node's cell still flips to its value

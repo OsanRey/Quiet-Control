@@ -100,6 +100,7 @@ pub fn update_settings(
     close_connections_on_switch: Option<bool>,
     locale: Option<String>,
     theme: Option<String>,
+    quiet_theme: Option<String>,
     accent: Option<String>,
     glow_color: Option<String>,
     hero_style: Option<String>,
@@ -135,6 +136,7 @@ pub fn update_settings(
     let mut titlebar_tint_changed = false;
     let settings = state
         .with_store_mut(|store| {
+            let previous_auto_mode=store.settings.auto_select;
             if let Some(p) = mixed_port {
                 store.settings.mixed_port = p;
             }
@@ -227,7 +229,7 @@ pub fn update_settings(
             }
             if let Some(loc) = locale {
                 let loc = loc.trim().to_ascii_lowercase();
-                if matches!(loc.as_str(), "zh" | "en") {
+                if matches!(loc.as_str(), "zh" | "en" | "ru") {
                     store.settings.locale = loc;
                 }
             }
@@ -235,6 +237,12 @@ pub fn update_settings(
                 let th = th.trim().to_ascii_lowercase();
                 if matches!(th.as_str(), "aerospace" | "day") {
                     store.settings.theme = th;
+                }
+            }
+            if let Some(preference) = quiet_theme {
+                let preference = preference.trim().to_ascii_lowercase();
+                if matches!(preference.as_str(), "dark" | "light" | "system") {
+                    store.settings.quiet_theme = Some(preference);
                 }
             }
             if let Some(ac) = accent {
@@ -351,6 +359,11 @@ pub fn update_settings(
                     ),
                 );
             }
+            if previous_auto_mode==crate::domain::AutoSelectMode::Off && store.settings.auto_select!=previous_auto_mode {
+                store.settings.last_manual_node_id=store.settings.current_node_id.clone();
+            } else if previous_auto_mode!=crate::domain::AutoSelectMode::Off && store.settings.auto_select==crate::domain::AutoSelectMode::Off {
+                core_config_changed |= store.restore_manual_selection();
+            }
             // —— Multi-core mode (sing-box main mode) ——
             if let Some(v) = multi_core_enabled {
                 // Defense in depth for a stale UI: the mode only exists under
@@ -413,6 +426,10 @@ pub fn update_settings(
                     store.settings.tls_fragment_xray = v;
                 }
             }
+            if store.settings.selected_apps_only {
+                if !store.settings.find_process || store.settings.outbound_mode!=crate::domain::OutboundMode::Rule || store.settings.route_final!="direct" {core_config_changed=true;}
+                store.settings.find_process=true;store.settings.outbound_mode=crate::domain::OutboundMode::Rule;store.settings.route_final="direct".into();
+            }
             Ok(store.settings.clone())
         })
         .map_err(|e| e.to_string())?;
@@ -453,14 +470,8 @@ pub async fn set_current_node(app: AppHandle, node_id: String) -> Result<AppSett
         let state = worker_app
             .try_state::<AppState>()
             .ok_or_else(|| "app state unavailable".to_string())?;
-        let (settings, restart_needed, _) = state
-            .select_current_node_serialized(&node_id, true, true)
-            .map_err(|e| e.to_string())?;
-        // Kernel mode rebuilds the group; Xray has no live selection API —
-        // both land here as restart_needed while the core is running.
-        if restart_needed {
-            crate::rule_apply::request_restart(worker_app.clone(), Vec::new());
-        }
+        let resources=worker_app.path().resource_dir().ok();
+        let settings=state.select_node_and_apply(&node_id,resources.as_deref()).map_err(|e|e.to_string())?;
         Ok(settings)
     })
     .await
@@ -476,6 +487,11 @@ pub fn rename_node(
     state
         .with_store_mut(|store| store.rename_node(&id, name))
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+pub fn prepare_node_selection(state: State<'_,AppState>,node_id:String)->Result<AppSettings,String> {
+    state.prepare_node_selection(&node_id).map_err(|e|e.to_string())
 }
 
 /// Toggle a node's favorite flag; returns the new state (true = now
@@ -549,7 +565,7 @@ pub fn update_node(
 }
 
 #[tauri::command(async)]
-pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, String> {
+pub fn list_all_nodes(state: State<'_, AppState>, include_inactive: Option<bool>) -> Result<Vec<ListedNode>, String> {
     state
         .with_store(|store| {
             let names: HashMap<&str, String> = store
@@ -572,9 +588,9 @@ pub fn list_all_nodes(state: State<'_, AppState>) -> Result<Vec<ListedNode>, Str
             Ok(store
                 .nodes
                 .iter()
-                .filter(|n| enabled.contains(n.subscription_id.as_str()))
+                .filter(|n| include_inactive.unwrap_or(false) || enabled.contains(n.subscription_id.as_str()))
                 .filter(|n| {
-                    core_kind.supports_node(&n.node)
+                    include_inactive.unwrap_or(false) || core_kind.supports_node(&n.node)
                         || crate::runtime::node_delegatable(&store.settings, &n.node)
                 })
                 .map(|n| ListedNode {
@@ -913,6 +929,7 @@ pub async fn generate_singbox_config(
             dns,
             outbound_mode: settings.outbound_mode,
             route_final: settings.route_final.clone(),
+            selected_apps_only: settings.selected_apps_only,
             auto_select: settings.auto_select,
             probe_url: settings.probe_url.clone(),
             find_process: settings.find_process,
@@ -1044,6 +1061,7 @@ pub async fn preview_singbox_config(
             dns,
             outbound_mode: settings.outbound_mode,
             route_final: settings.route_final.clone(),
+            selected_apps_only: settings.selected_apps_only,
             auto_select: settings.auto_select,
             probe_url: settings.probe_url.clone(),
             find_process: settings.find_process,
