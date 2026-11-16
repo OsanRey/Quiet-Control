@@ -23,7 +23,7 @@ try{
  Copy-Item -Path (Join-Path $payload 'Scripts\*') -Destination ($qaRoot+'\Scripts') -Recurse
  . ($qaRoot+'\Scripts\cleanup\engine-process.ps1')
  $env:QC_QA_ROOT=$qaRoot.Replace('\','/')
- $result=Invoke-QAEngine -Executable ($qaRoot+'\node.exe') -Arguments @('--no-maglev','--no-turbofan',$qaRoot+'\Scripts\cleanup\acceptance.mjs') -Stdout ($qaRoot+'\Results\stdout.log') -Stderr ($qaRoot+'\Results\stderr.log') -TimeoutMs 360000
+ $result=Invoke-QAEngine -Executable ($qaRoot+'\node.exe') -Arguments @('--no-maglev','--no-turbofan',($qaRoot+'\Scripts\cleanup\acceptance.mjs')) -Stdout ($qaRoot+'\Results\stdout.log') -Stderr ($qaRoot+'\Results\stderr.log') -TimeoutMs 360000
  $state.exitCode=$result.ExitCode
  if($result.TimedOut -or $result.ExitCode -ne 0){throw 'Cleanup QA failed; inspect retained stderr/report'}
  $report=Get-Content -Raw -LiteralPath ($qaRoot+'\Results\cleanup.json')|ConvertFrom-Json

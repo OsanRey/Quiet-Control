@@ -54,8 +54,19 @@ for run, base in runs:
         continue
     files = {name:seg for parent, name, seg, directory in matches if parent == results[0] and not directory}
     if report_name not in files:
-        continue
+        # A runner can fail before producing its first JSON. Preserve this
+        # failed run when its own input manifest proves the requested stage.
+        if "QA-INPUTS.json" not in files:
+            continue
+        try:
+            inputs=json.loads(ntfs.mft.get(files["QA-INPUTS.json"]).open().read().decode("utf-8-sig"))
+            if inputs.get("stage") != args.stage:
+                continue
+        except (ValueError,UnicodeError):
+            continue
     try:
+        if report_name not in files:
+            raise ValueError("Runner exited before creating the QA report; inspect stderr.log and launcher-state.json")
         report = json.loads(ntfs.mft.get(files[report_name]).open().read())
     except (ValueError, UnicodeError) as error:
         # Preserve the newest failed run's launcher logs instead of silently

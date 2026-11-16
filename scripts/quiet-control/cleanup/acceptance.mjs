@@ -6,7 +6,7 @@ import {connect,wait} from './cdp.mjs';
 const qa=process.env.QC_QA_ROOT;
 if(!qa||!fs.existsSync(qa+'/qa-guest.marker'))throw Error('Marked VMware QA root required');
 const out=qa+'/Results',root=qa+'/Extract/Satelite-Research',exec=promisify(execFile);
-const report={stage:'cleanup',qaVersion:'QC_CLEAN_V1',checks:[],errors:[],screenshots:[]};
+const report={stage:'cleanup',qaVersion:'QC_CLEAN_V2',checks:[],errors:[],screenshots:[]};
 let app,c;
 const save=()=>fs.writeFileSync(out+'/cleanup.json',JSON.stringify(report,null,2));
 const check=(name,passed)=>{report.checks.push({name,passed:!!passed});save()};
